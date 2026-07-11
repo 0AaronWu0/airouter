@@ -326,7 +326,7 @@ function createAccountManager(options) {
     applyQuotaState(config, quotaState);
 
     if (allowSwitch && config === getActiveConfig()) {
-      return ensureActiveConfig('quota_update');
+      return ensureActiveConfig('quota_update', item => shouldUseQuotaMonitoring(item.type));
     }
 
     return config;
@@ -340,6 +340,7 @@ function createAccountManager(options) {
       allowSwitch = config === getActiveConfig(),
       lastError = null,
       switchReason = 'runtime_unavailable',
+      switchPredicate = () => true,
     } = options;
 
     if (!config || !config.runtime) {
@@ -352,7 +353,7 @@ function createAccountManager(options) {
     config.runtime.lastError = lastError;
 
     if (allowSwitch && config === getActiveConfig()) {
-      return ensureActiveConfig(switchReason);
+      return ensureActiveConfig(switchReason, switchPredicate);
     }
 
     return config;
@@ -597,7 +598,10 @@ function createAccountManager(options) {
   /**
    * 轮询所有 token 账号额度；活动配置统一按 configs[] 顺序选择。
    */
-  async function refreshQuotas(reason = 'poll') {
+  async function refreshQuotas(reason = 'poll', options = {}) {
+    const refreshPredicate = typeof options.refreshPredicate === 'function'
+      ? options.refreshPredicate
+      : config => shouldUseQuotaMonitoring(config.type);
     if (!configs.some(config => shouldUseQuotaMonitoring(config.type))) {
       return;
     }
@@ -611,12 +615,15 @@ function createAccountManager(options) {
 
     try {
       for (const config of configs) {
-        if (shouldUseQuotaMonitoring(config.type)) {
+        if (shouldUseQuotaMonitoring(config.type) && refreshPredicate(config)) {
           await refreshSingleConfigWithLogging(config, reason);
         }
       }
 
-      const currentConfig = ensureActiveConfig(reason);
+      const currentBeforeRefresh = configs[activeConfigIndex] || null;
+      const currentConfig = currentBeforeRefresh && shouldUseQuotaMonitoring(currentBeforeRefresh.type)
+        ? ensureActiveConfig(reason, item => shouldUseQuotaMonitoring(item.type))
+        : currentBeforeRefresh;
 
       if (previousActiveIndex !== activeConfigIndex && currentConfig) {
         warn(`当前活动账号: ${getAccountLabel(currentConfig)}`);
@@ -667,6 +674,7 @@ function createAccountManager(options) {
     getAccountStatus,
     applyQuotaPayload,
     markConfigUnavailable,
+    checkSingleAccountQuota,
   };
 }
 

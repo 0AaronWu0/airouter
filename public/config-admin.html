@@ -738,6 +738,10 @@
               <input id="apiKeyDescriptionInput" type="text" placeholder="例如：OpenAI 兼容备用上游">
             </div>
             <div class="field">
+              <label class="field-label" for="apiKeyRateInput">倍率</label>
+              <input id="apiKeyRateInput" type="text" inputmode="decimal" placeholder="0.1">
+            </div>
+            <div class="field">
               <span class="field-label">支持能力</span>
               <div class="support-options">
                 <label class="support-option">
@@ -837,6 +841,7 @@
     const apiKeyBaseUrlInput = document.getElementById('apiKeyBaseUrlInput');
     const apiKeyInput = document.getElementById('apiKeyInput');
     const apiKeyDescriptionInput = document.getElementById('apiKeyDescriptionInput');
+    const apiKeyRateInput = document.getElementById('apiKeyRateInput');
     const addButton = document.getElementById('addButton');
     const refreshButton = document.getElementById('refreshButton');
     const testResponseButton = document.getElementById('testResponseButton');
@@ -973,6 +978,7 @@
         apiKey: apiKeyInput.value,
         baseUrl: apiKeyBaseUrlInput.value,
         description: apiKeyDescriptionInput.value,
+        rate: apiKeyRateInput.value,
         support: getSelectedApiKeySupport(),
       });
     }
@@ -982,6 +988,7 @@
       apiKeyInput.value = '';
       apiKeyBaseUrlInput.value = '';
       apiKeyDescriptionInput.value = '';
+      apiKeyRateInput.value = '';
       document.querySelectorAll('input[name="apiKeySupport"]').forEach(input => {
         input.checked = input.value === 'gpt';
       });

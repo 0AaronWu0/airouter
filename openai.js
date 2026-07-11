@@ -27,6 +27,7 @@ const {
     resolveResponsesOptions,
     createRuntimeConfigs,
     buildAuthHeadersForConfig,
+    isApiModeAutoSwitchEnabled,
     shouldUseQuotaMonitoring,
     configSupportsCapability,
     getConfigItemType
@@ -59,6 +60,8 @@ const CONTROL_TOKEN = process.env.AIROUTER_CONTROL_TOKEN || '';
 const CONTROL_REQUEST_FILE = process.env.AIROUTER_CONTROL_REQUEST_FILE || '';
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';
 const QUOTA_CHECK_INTERVAL_MS = 1 * 60 * 1000;
+const API_MODE_AUTO_SWITCH_INTERVAL_MS = 5 * 60 * 1000;
+const API_MODE_LOW_RATE_THRESHOLD = 0.1;
 const MIN_REMAINING_PERCENT = 3;
 const MIN_WEEKLY_REMAINING_PERCENT = 1;
 const HOP_BY_HOP_HEADERS = new Set([
@@ -187,6 +190,9 @@ let accountManager = null;
 let handleClaudeMessagesRequest = null;
 let server = null;
 let shuttingDown = false;
+let apiModeAutoSwitchEnabled = false;
+let apiModeAutoSwitchTimer = null;
+let apiModeAutoSwitchRunning = false;
 const activeSockets = new Set();
 
 // ==================== 工具函数 ====================
@@ -443,6 +449,125 @@ function classifyApiKeyUpstreamFailure(config, statusCode) {
     return null;
 }
 
+function getConfigRate(config) {
+    const rate = Number(config && config.rate);
+    return Number.isFinite(rate) ? rate : null;
+}
+
+function isLowRateApiModeConfig(config) {
+    const rate = getConfigRate(config);
+    return Boolean(config && config.type === 'apikey' && rate !== null && rate <= API_MODE_LOW_RATE_THRESHOLD);
+}
+
+function selectApiModeAutoSwitchTarget(configs, activeConfig, getAccountStatus = () => null) {
+    if (!activeConfig || activeConfig.type !== 'apikey') {
+        return null;
+    }
+
+    const activeRate = getConfigRate(activeConfig);
+    if (activeRate === null) {
+        return null;
+    }
+
+    let target = null;
+    let targetRate = activeRate;
+    for (const config of configs || []) {
+        if (!isLowRateApiModeConfig(config)) {
+            continue;
+        }
+
+        const status = getAccountStatus(config);
+        const available = status ? status.available !== false : config.runtime && config.runtime.available !== false;
+        const rate = getConfigRate(config);
+        if (!available || rate === null || rate >= targetRate) {
+            continue;
+        }
+
+        target = config;
+        targetRate = rate;
+    }
+
+    return target;
+}
+
+async function probeApiKeyConfig(config) {
+    const result = await createUpstreamRequest({
+        method: 'GET',
+        targetUrl: new URL('/v1/models', config.baseUrl).toString(),
+        headers: buildAuthHeadersForConfig(config),
+        timeoutMs: QUOTA_CHECK_TIMEOUT_MS,
+    }).responsePromise;
+
+    const statusCode = Number(result.statusCode || 0);
+    void drainAbandonedResponse(result);
+    if (statusCode >= 200 && statusCode < 300) {
+        config.runtime.available = true;
+        config.runtime.reason = 'apikey';
+        config.runtime.lastCheckedAt = getCurrentTimestamp();
+        config.runtime.lastError = null;
+        return true;
+    }
+
+    config.runtime.available = false;
+    config.runtime.reason = classifyApiKeyUpstreamFailure(config, statusCode)?.reason || 'apikey_upstream_error';
+    config.runtime.lastCheckedAt = getCurrentTimestamp();
+    config.runtime.lastError = `http:${statusCode}`;
+    return false;
+}
+
+async function refreshLowRateApiModeConfigs() {
+    if (!apiModeAutoSwitchEnabled || !accountManager || apiModeAutoSwitchRunning) {
+        return;
+    }
+
+    apiModeAutoSwitchRunning = true;
+    try {
+        for (const config of apiConfigs) {
+            if (isLowRateApiModeConfig(config) && config.runtime && config.runtime.available === false) {
+                try {
+                    const recovered = await probeApiKeyConfig(config);
+                    if (recovered) {
+                        warn(`API 模式配置恢复可用: #${config.index + 1} ${config.description} (rate=${config.rate || 'unknown'})`);
+                    }
+                } catch (err) {
+                    config.runtime.available = false;
+                    config.runtime.reason = 'apikey_upstream_error';
+                    config.runtime.lastCheckedAt = getCurrentTimestamp();
+                    config.runtime.lastError = err.message;
+                }
+            }
+        }
+
+        const activeConfig = accountManager.getActiveConfig();
+        const target = selectApiModeAutoSwitchTarget(apiConfigs, activeConfig, config => accountManager.getAccountStatus(config));
+        if (target && target !== activeConfig) {
+            accountManager.activateConfig(target.index, 'api_mode_auto_switch');
+            warn(`API 模式自动切换: #${target.index + 1} ${target.description} (rate=${target.rate || 'unknown'})`);
+        }
+    } finally {
+        apiModeAutoSwitchRunning = false;
+    }
+}
+
+function stopApiModeAutoSwitchMonitor() {
+    if (apiModeAutoSwitchTimer) {
+        clearInterval(apiModeAutoSwitchTimer);
+        apiModeAutoSwitchTimer = null;
+    }
+}
+
+function startApiModeAutoSwitchMonitor() {
+    stopApiModeAutoSwitchMonitor();
+    if (!apiModeAutoSwitchEnabled) {
+        return;
+    }
+
+    apiModeAutoSwitchTimer = setInterval(() => {
+        void refreshLowRateApiModeConfigs();
+    }, API_MODE_AUTO_SWITCH_INTERVAL_MS);
+    void refreshLowRateApiModeConfigs();
+}
+
 function isResponsesFailoverInspectionCandidate(statusCode, headers) {
     const normalizedStatusCode = Number(statusCode);
     return normalizedStatusCode === 429 ||
@@ -694,12 +819,14 @@ function applyLoadedConfig(loadedConfig) {
     currentParsedConfig = loadedConfig.parsed;
     apiConfigs = loadedConfig.configs;
     configType = getConfigPoolType(apiConfigs);
+    apiModeAutoSwitchEnabled = isApiModeAutoSwitchEnabled(currentParsedConfig);
     claudeCodeConfig = loadedConfig.claudeCode;
     responsesConfig = loadedConfig.responses;
 
     if (accountManager) {
         accountManager.stopQuotaMonitor();
     }
+    stopApiModeAutoSwitchMonitor();
 
     accountManager = createAccountManager({
         configs: apiConfigs,
@@ -723,6 +850,7 @@ function applyLoadedConfig(loadedConfig) {
         now: getCurrentTimestamp
     });
     handleClaudeMessagesRequest = createClaudeMessagesRequestHandler();
+    startApiModeAutoSwitchMonitor();
 }
 
 function hydrateLoadedConfig(loadedConfig, options = {}) {
@@ -953,6 +1081,7 @@ function buildConfigAdminResponse() {
         proxy_port: currentParsedConfig.proxy_port ?? null,
         apikeys: configuredApiKeys,
         apikey_required: configuredApiKeys.length > 0,
+        api_mode_auto_switch: apiModeAutoSwitchEnabled,
         claude_code: currentParsedConfig.claude_code ?? null,
         responses: currentParsedConfig.responses ?? null,
         active_config_index: activeAccountStatus ? activeAccountStatus.index : null,
@@ -973,7 +1102,9 @@ async function refreshConfigAdminResponse(options = {}) {
     const buildResponse = options.buildResponse || buildConfigAdminResponse;
 
     if (manager && shouldRefreshQuota) {
-        await manager.refreshQuotas('admin_refresh');
+        await manager.refreshQuotas('admin_refresh', {
+            refreshPredicate: config => config.type !== 'apikey' && config.runtime && config.runtime.available === false
+        });
     }
 
     return buildResponse();
@@ -1255,8 +1386,55 @@ function shouldForceResponsesStoreFalse(config, rewrittenUrl) {
     return Boolean(config && config.type === 'token' && isResponsesPath(rewrittenUrl));
 }
 
+function sanitizeImageCapabilitiesRequestBody(value, stats = { images: 0, unsupportedTools: 0, emptyItems: 0 }) {
+    if (Array.isArray(value)) {
+        const items = [];
+        for (const item of value) {
+            const sanitized = sanitizeImageCapabilitiesRequestBody(item, stats);
+            if (sanitized === null) {
+                stats.emptyItems += 1;
+                continue;
+            }
+            items.push(sanitized);
+        }
+        return items;
+    }
+
+    if (!value || typeof value !== 'object') {
+        return value;
+    }
+
+    const type = typeof value.type === 'string' ? value.type : '';
+    if (type === 'input_image') {
+        stats.images += 1;
+        return null;
+    }
+
+    if (type === 'image_generation') {
+        stats.unsupportedTools += 1;
+        return null;
+    }
+
+    const nextValue = {};
+    for (const [key, childValue] of Object.entries(value)) {
+        const sanitized = sanitizeImageCapabilitiesRequestBody(childValue, stats);
+        if (sanitized === null) {
+            continue;
+        }
+        nextValue[key] = sanitized;
+    }
+
+    return nextValue;
+}
+
 function normalizeProxyJsonBody(config, rewrittenUrl, body, responsesOptions) {
-    return normalizeResponsesRequestBody(rewrittenUrl, body, {
+    const stats = { images: 0, unsupportedTools: 0, emptyItems: 0 };
+    const sanitizedBody = sanitizeImageCapabilitiesRequestBody(body, stats);
+    if (stats.images > 0 || stats.unsupportedTools > 0 || stats.emptyItems > 0) {
+        log(`请求去除 image 能力: images=${stats.images} unsupported_tools=${stats.unsupportedTools} empty_items=${stats.emptyItems}`);
+    }
+
+    return normalizeResponsesRequestBody(rewrittenUrl, sanitizedBody, {
         ...responsesOptions,
         forceStoreFalse: shouldForceResponsesStoreFalse(config, rewrittenUrl),
     });
@@ -1352,6 +1530,7 @@ function applyResponseHeaders(res, statusCode, rawHeaders) {
 function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const hasBufferedBody = Buffer.isBuffer(body);
     const failoverAttempt = Number(options.failoverAttempt || 0);
+    const switchPredicate = typeof options.configPredicate === 'function' ? options.configPredicate : () => true;
     const headers = applyResponsesFailoverRequestHeaders(
         buildProxyHeaders(req.headers, config, hasBufferedBody ? body.length : undefined),
         req.url
@@ -1453,6 +1632,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             const nextConfig = accountManager.markConfigUnavailable(config, apiKeyFailure.reason, {
                 lastError: `${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}`,
                 switchReason: 'apikey_upstream_failover',
+                switchPredicate,
             });
 
             if (!requestClosed && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
@@ -1461,6 +1641,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
                 proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                     failoverAttempt: failoverAttempt + 1,
+                    configPredicate: switchPredicate,
                 });
                 return;
             }
@@ -1477,6 +1658,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 const nextConfig = accountManager.markConfigUnavailable(config, inspection.classification.reason, {
                     lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
                     switchReason: 'responses_failover',
+                    switchPredicate,
                 });
 
                 if (!requestClosed && nextConfig && nextConfig !== config) {
@@ -1485,6 +1667,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
                     proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                         failoverAttempt: failoverAttempt + 1,
+                        configPredicate: switchPredicate,
                     });
                     return;
                 }
@@ -1535,12 +1718,14 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             const nextConfig = accountManager.markConfigUnavailable(config, 'apikey_upstream_error', {
                 lastError: err.message,
                 switchReason: 'apikey_upstream_failover',
+                switchPredicate,
             });
 
             if (!headersApplied && !res.headersSent && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
                 const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
                 proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                     failoverAttempt: failoverAttempt + 1,
+                    configPredicate: switchPredicate,
                 });
                 return;
             }
@@ -1573,7 +1758,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
 
 function createHandler(proxyPath = '') {
     return function handler(req, res) {
-        const isOpenAiConfig = item => item.type === 'token' || configSupportsCapability(item, 'gpt');
+        const isOpenAiConfig = item => item.type === 'token' || (apiModeAutoSwitchEnabled && configSupportsCapability(item, 'gpt'));
         const config = accountManager.getActiveConfig(isOpenAiConfig) ||
             accountManager.ensureActiveConfig('proxy_request', isOpenAiConfig);
         if (!config) {
@@ -1612,10 +1797,14 @@ function createHandler(proxyPath = '') {
                     }
                 }
 
-                proxyRequest(req, res, config, body, incomingUrl);
+                proxyRequest(req, res, config, body, incomingUrl, {
+                    configPredicate: isOpenAiConfig,
+                });
             });
         } else {
-            proxyRequest(req, res, config, undefined, incomingUrl);
+            proxyRequest(req, res, config, undefined, incomingUrl, {
+                configPredicate: isOpenAiConfig,
+            });
         }
     };
 }
@@ -1643,6 +1832,7 @@ function shutdownServer(reason) {
     shuttingDown = true;
     log(`${reason}，正在关闭服务器...`);
     stopControlWatcher();
+    stopApiModeAutoSwitchMonitor();
 
     if (accountManager) {
         accountManager.stopQuotaMonitor();
@@ -1914,7 +2104,7 @@ app.post('/admin/api/settings', async (req, res) => {
         const settings = {};
         const body = req.body && typeof req.body === 'object' ? req.body : {};
 
-        for (const field of ['port', 'proxy_port', 'responses']) {
+        for (const field of ['port', 'proxy_port', 'responses', 'api_mode_auto_switch']) {
             if (Object.prototype.hasOwnProperty.call(body, field)) {
                 settings[field] = body[field];
             }
@@ -2085,6 +2275,7 @@ async function startServer() {
             log(`  - 模式: ${configType}`);
             log(`  - 账号数量: ${apiConfigs.length}`);
             log(`  - 当前账号: ${currentAccountStatus ? currentAccountStatus.label : '未配置'}`);
+            log(`  - API 模式: ${apiModeAutoSwitchEnabled ? '开启' : '关闭'}`);
             log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查所有 token 账号，主额度低于 ${MIN_REMAINING_PERCENT}% 或周额度不高于 ${MIN_WEEKLY_REMAINING_PERCENT}% 自动标记不可用` : '关闭（无 token 配置项）'}`);
             log(`  - 上游请求超时: ${UPSTREAM_REQUEST_TIMEOUT_MS > 0 ? `${UPSTREAM_REQUEST_TIMEOUT_MS}ms` : '关闭'}`);
             log(`  - quota check 超时: ${hasQuotaMonitoredConfigs(apiConfigs) ? `${QUOTA_CHECK_TIMEOUT_MS}ms` : '关闭（无 token 配置项）'}`);
@@ -2143,6 +2334,8 @@ module.exports = {
     getGatewayStatusCode,
     isResponsesFailoverInspectionCandidate,
     normalizeProxyJsonBody,
+    sanitizeImageCapabilitiesRequestBody,
+    selectApiModeAutoSwitchTarget,
     shouldForceResponsesStoreFalse,
     activateConfigAdminResponse,
     openExternalUrl,

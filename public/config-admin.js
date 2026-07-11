@@ -243,13 +243,19 @@
       throw new Error('apikey 模式下请填写 Base URL');
     }
 
-    return {
+    const result = {
       type: 'apikey',
       apikey,
       base_url: baseUrl,
       description: normalizeText(formValues.description),
       support: normalizeSupport(formValues.support),
     };
+    const rate = normalizeText(formValues.rate);
+    if (rate) {
+      result.rate = rate;
+    }
+
+    return result;
   }
 
   function getConfigGuideContent(snapshot) {

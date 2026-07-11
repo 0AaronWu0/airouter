@@ -35,3 +35,13 @@ test('chrome popup hides the top-priority action from config cards', () => {
   assert.doesNotMatch(popupScript, /data-action="move-config"/);
   assert.doesNotMatch(popupScript, /\/admin\/api\/configs\/\$\{index\}\/move-up/);
 });
+
+test('chrome popup exposes API mode toggle, filters, and AIRouter branding', () => {
+  assert.match(popupHtml, /<title>AIRouter Admin<\/title>/);
+  assert.match(popupHtml, /id="apiModeAutoSwitchButton"/);
+  assert.match(popupHtml, /data-filter="all"/);
+  assert.match(popupHtml, /data-filter="token"/);
+  assert.match(popupHtml, /data-filter="apikey"/);
+  assert.match(popupHtml, /id="apiKeyRateInput"/);
+  assert.match(popupScript, /api_mode_auto_switch/);
+});

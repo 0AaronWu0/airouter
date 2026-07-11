@@ -10,6 +10,7 @@ const {
   classifyApiKeyUpstreamFailure,
   isResponsesFailoverInspectionCandidate,
   normalizeProxyJsonBody,
+  sanitizeImageCapabilitiesRequestBody,
   shouldForceResponsesStoreFalse,
 } = require('../openai');
 const { createClaudeMessagesHandler } = require('../app/claude-messages-handler');
@@ -77,6 +78,24 @@ function createUpstreamResponse(statusCode, headers, body) {
   });
   return response;
 }
+
+test('sanitizeImageCapabilitiesRequestBody removes image inputs and image generation tools', () => {
+  const sanitized = sanitizeImageCapabilitiesRequestBody({
+    input: [
+      { type: 'input_text', text: 'hello' },
+      { type: 'input_image', image_url: 'https://example.com/image.png' },
+    ],
+    tools: [
+      { type: 'image_generation' },
+      { type: 'function', name: 'keep_me' },
+    ],
+  });
+
+  assert.deepEqual(sanitized, {
+    input: [{ type: 'input_text', text: 'hello' }],
+    tools: [{ type: 'function', name: 'keep_me' }],
+  });
+});
 
 test('buildProxyHeaders strips local-only auth headers before forwarding upstream', () => {
   const headers = buildProxyHeaders({

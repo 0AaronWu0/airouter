@@ -192,6 +192,7 @@ test('buildImportedConfigItem keeps item-level apikey credentials', () => {
     base_url: ' https://api.example.com/v1/ ',
     description: ' third party ',
     support: [' gpt ', 'claude', 'gpt'],
+    rate: ' 0.17 ',
   });
 
   assert.deepEqual(imported, {
@@ -200,6 +201,20 @@ test('buildImportedConfigItem keeps item-level apikey credentials', () => {
     base_url: 'https://api.example.com/v1',
     description: 'third party',
     support: ['gpt', 'claude'],
+    rate: '0.17',
+  });
+});
+
+test('buildImportedConfigItem rejects an invalid apikey rate', () => {
+  assert.throws(() => buildImportedConfigItem({
+    type: 'apikey',
+    apikey: 'sk-third-party',
+    base_url: 'https://api.example.com/v1',
+    rate: '0.1x',
+  }), err => {
+    assert.equal(err instanceof ConfigEditorError, true);
+    assert.match(err.message, /apikey 倍率必须是数字/);
+    return true;
   });
 });
 
@@ -278,6 +293,14 @@ test('updateConfigSettings normalizes top-level apikeys and auth_token', () => {
   assert.equal(cleared.auth_token, '');
   assert.equal(cleared.configs.length, 1);
   assert.equal(cleared.configs[0].description, 'primary');
+});
+
+test('updateConfigSettings persists api mode auto switch setting', () => {
+  const next = updateConfigSettings(createTokenConfig(), {
+    api_mode_auto_switch: true,
+  });
+
+  assert.equal(next.api_mode_auto_switch, true);
 });
 
 test('updateConfigSettings normalizes service port and proxy port settings', () => {

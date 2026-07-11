@@ -16,21 +16,16 @@ const apiKeyConfigPanel = document.getElementById('apiKeyConfigPanel');
 const apiKeyBaseUrlInput = document.getElementById('apiKeyBaseUrlInput');
 const apiKeyInput = document.getElementById('apiKeyInput');
 const apiKeyDescriptionInput = document.getElementById('apiKeyDescriptionInput');
-const apiKeyRateInput = document.getElementById('apiKeyRateInput');
 const saveSettingsButton = document.getElementById('saveSettingsButton');
 const openAdminButton = document.getElementById('openAdminButton');
 const startServiceButton = document.getElementById('startServiceButton');
 const restartServiceButton = document.getElementById('restartServiceButton');
 const refreshButton = document.getElementById('refreshButton');
-const apiModeAutoSwitchButton = document.getElementById('apiModeAutoSwitchButton');
 const addApiKeyButton = document.getElementById('addApiKeyButton');
 const addConfigButton = document.getElementById('addConfigButton');
-const configFilterTabs = [...document.querySelectorAll('[data-filter]')];
 
 let snapshot = null;
 let settings = { ...DEFAULT_SETTINGS };
-let apiModeAutoSwitchEnabled = false;
-let selectedConfigFilter = '';
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -123,37 +118,9 @@ async function requestJson(path, options = {}) {
 
 function runtimeBadge(item) {
   if (item.is_active) {
-    return '<span class="badge active">当前</span>';
+    return '<span class="badge active">当前使用</span>';
   }
   return '';
-}
-
-function updateApiModeToggle(enabled) {
-  apiModeAutoSwitchEnabled = Boolean(enabled);
-  apiModeAutoSwitchButton.classList.toggle('is-on', apiModeAutoSwitchEnabled);
-  apiModeAutoSwitchButton.classList.toggle('is-off', !apiModeAutoSwitchEnabled);
-  apiModeAutoSwitchButton.setAttribute('aria-pressed', apiModeAutoSwitchEnabled ? 'true' : 'false');
-}
-
-function setSelectedConfigFilter(nextFilter) {
-  selectedConfigFilter = nextFilter || (apiModeAutoSwitchEnabled ? 'apikey' : 'token');
-  for (const tab of configFilterTabs) {
-    const active = tab.dataset.filter === selectedConfigFilter;
-    tab.classList.toggle('is-active', active);
-    tab.setAttribute('aria-selected', active ? 'true' : 'false');
-  }
-}
-
-function getConfigType(item) {
-  return item?.item?.type === 'apikey' ? 'apikey' : 'token';
-}
-
-function getVisibleConfigs(configs) {
-  if (selectedConfigFilter === 'all') {
-    return configs;
-  }
-
-  return configs.filter(item => getConfigType(item) === selectedConfigFilter);
 }
 
 function getSelectedConfigMode() {
@@ -213,8 +180,7 @@ function buildConfigItemFromInputs() {
     apikey,
     base_url: baseUrl,
     description: String(apiKeyDescriptionInput.value || '').trim(),
-    support,
-    rate: String(apiKeyRateInput.value || '').trim()
+    support
   };
 }
 
@@ -223,7 +189,6 @@ function clearConfigForm() {
   apiKeyBaseUrlInput.value = '';
   apiKeyInput.value = '';
   apiKeyDescriptionInput.value = '';
-  apiKeyRateInput.value = '';
   document.querySelectorAll('input[name="apiKeySupport"]').forEach(input => {
     input.checked = input.value === 'gpt';
   });
@@ -306,7 +271,7 @@ function renderMetricCard(label, value, refreshAt) {
 
   return `<div class="metric-card">
     <span class="metric-badge">${escapeHtml(label)} <strong>${escapeHtml(value)}</strong></span>
-    ${refreshAt ? `<div class="metric-time">${escapeHtml(refreshAt)}</div>` : ''}
+    ${refreshAt ? `<div class="metric-time">刷新时间 ${escapeHtml(refreshAt)}</div>` : ''}
   </div>`;
 }
 
@@ -348,16 +313,14 @@ function formatCreatedAt(item) {
     return '';
   }
 
-  const date = new Date(rawValue);
-  if (Number.isNaN(date.getTime())) {
-    return String(rawValue);
+  const normalized = String(rawValue).trim();
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!match) {
+    return normalized;
   }
 
-  const month = date.getMonth() + 1;
-  const day = date.getDate();
-  const hour = String(date.getHours()).padStart(2, '0');
-  const minute = String(date.getMinutes()).padStart(2, '0');
-  return `${date.getFullYear()}年${month}月${day}号 ${hour}:${minute}`;
+  const [, year, month, day, hour, minute] = match;
+  return `${year}年${Number(month)}月${Number(day)}号 ${hour}:${minute}`;
 }
 
 function formatCreatedDays(item) {
@@ -415,14 +378,13 @@ function renderApiKeys(apikeys) {
 }
 
 function renderCards(data) {
-  const visibleConfigs = getVisibleConfigs(data.configs || []);
-  if (!visibleConfigs.length) {
+  if (!data.configs.length) {
     cardsEl.innerHTML = '<div class="empty">当前没有配置项。</div>';
     return;
   }
 
   cardsEl.innerHTML = `<div class="stack-list">
-    ${visibleConfigs.map(item => `
+    ${data.configs.map(item => `
       <details class="config-item config-disclosure ${getConfigStateClass(item)}">
         <summary class="config-summary-head">
           <div class="config-summary-layout">
@@ -459,8 +421,6 @@ function renderCards(data) {
 function renderSnapshot(data) {
   snapshot = data;
   const apikeys = Array.isArray(data?.apikeys) ? data.apikeys : [];
-  updateApiModeToggle(Boolean(data?.api_mode_auto_switch));
-  setSelectedConfigFilter(selectedConfigFilter || (apiModeAutoSwitchEnabled ? 'apikey' : 'token'));
 
   if (apikeys.length > 0) {
     apiKeyStatusBadge.className = 'badge ok';
@@ -474,12 +434,43 @@ function renderSnapshot(data) {
   renderCards(data);
 }
 
+function getUnavailableActiveConfig(data) {
+  const configs = Array.isArray(data?.configs) ? data.configs : [];
+  const activeConfig = configs.find(item => item.is_active);
+  return activeConfig?.runtime?.available === false ? activeConfig : null;
+}
+
+function getFallbackAvailableConfig(data, activeIndex) {
+  const configs = Array.isArray(data?.configs) ? data.configs : [];
+  return configs.find(item => item.index !== activeIndex && item.runtime?.available === true) || null;
+}
+
+async function autoSwitchUnavailableActiveConfig(data) {
+  const activeConfig = getUnavailableActiveConfig(data);
+  if (!activeConfig) {
+    return { data, message: '' };
+  }
+
+  const fallbackConfig = getFallbackAvailableConfig(data, activeConfig.index);
+  if (!fallbackConfig) {
+    return { data, message: '' };
+  }
+
+  const switchedData = await promoteAndActivateConfig(fallbackConfig.index);
+  return {
+    data: switchedData,
+    message: `当前配置 #${activeConfig.index + 1} 不可用，已自动切换到配置 #${fallbackConfig.index + 1} 并置顶。`
+  };
+}
+
 async function loadSnapshot(message = '') {
   try {
     const data = await requestJson('/admin/api/configs');
-    renderSnapshot(data);
+    const switchResult = await autoSwitchUnavailableActiveConfig(data);
+    renderSnapshot(switchResult.data);
     setConnectionBadge('ok', '连接正常');
-    setMessage(message ? 'info' : '', message);
+    const finalMessage = switchResult.message || message;
+    setMessage(finalMessage ? 'info' : '', finalMessage);
   } catch (error) {
     if (error.status === 401) {
       setConnectionBadge('warn', '鉴权失败');
@@ -541,13 +532,43 @@ async function deleteConfig(index) {
   setMessage('info', '配置项已删除并热重载。');
 }
 
-async function activateConfig(index) {
-  const result = await requestJson(`/admin/api/configs/${index}/activate`, {
+async function moveConfigToTop(index) {
+  return requestJson(`/admin/api/configs/${index}/move-up`, {
     method: 'POST'
   });
+}
+
+async function activateRuntimeConfig(index) {
+  return requestJson(`/admin/api/configs/${index}/activate`, {
+    method: 'POST'
+  });
+}
+
+function normalizeConfigIndex(index) {
+  const targetIndex = Number(index);
+  if (!Number.isInteger(targetIndex) || targetIndex < 0) {
+    throw new Error('配置项索引无效。');
+  }
+
+  return targetIndex;
+}
+
+async function promoteAndActivateConfig(index) {
+  const targetIndex = normalizeConfigIndex(index);
+  const finalIndex = targetIndex > 0 ? 0 : targetIndex;
+  if (targetIndex > 0) {
+    await moveConfigToTop(targetIndex);
+  }
+
+  return activateRuntimeConfig(finalIndex);
+}
+
+async function activateConfig(index) {
+  const targetIndex = normalizeConfigIndex(index);
+  const result = await promoteAndActivateConfig(targetIndex);
 
   renderSnapshot(result);
-  setMessage('info', '已切换当前使用配置。');
+  setMessage('info', targetIndex > 0 ? '已切换当前使用配置，并已置顶。' : '已切换当前使用配置。');
 }
 
 async function refreshConfigToken(index) {
@@ -557,19 +578,6 @@ async function refreshConfigToken(index) {
 
   renderSnapshot(result);
   setMessage('info', 'Token 已刷新并写回配置。');
-}
-
-async function updateApiModeAutoSwitch(enabled) {
-  const result = await requestJson('/admin/api/settings', {
-    method: 'POST',
-    body: JSON.stringify({
-      api_mode_auto_switch: Boolean(enabled)
-    })
-  });
-
-  selectedConfigFilter = enabled ? 'apikey' : 'token';
-  renderSnapshot(result);
-  setMessage('info', enabled ? 'API 模式已开启。' : 'API 模式已关闭。');
 }
 
 async function startService() {
@@ -617,9 +625,7 @@ saveSettingsButton.addEventListener('click', bindBusy(saveSettingsButton, async 
 }));
 
 refreshButton.addEventListener('click', bindBusy(refreshButton, async () => {
-  const previousFilter = selectedConfigFilter;
   await loadSnapshot('已刷新配置状态。');
-  setSelectedConfigFilter(previousFilter);
 }));
 
 openAdminButton.addEventListener('click', () => {
@@ -634,10 +640,6 @@ restartServiceButton.addEventListener('click', bindBusy(restartServiceButton, as
   await restartService();
 }));
 
-apiModeAutoSwitchButton.addEventListener('click', bindBusy(apiModeAutoSwitchButton, async () => {
-  await updateApiModeAutoSwitch(!apiModeAutoSwitchEnabled);
-}));
-
 addApiKeyButton.addEventListener('click', bindBusy(addApiKeyButton, async () => {
   await addApiKey();
 }));
@@ -649,15 +651,6 @@ addConfigButton.addEventListener('click', bindBusy(addConfigButton, async () => 
 document.querySelectorAll('input[name="configMode"]').forEach(input => {
   input.addEventListener('change', updateConfigMode);
 });
-
-for (const tab of configFilterTabs) {
-  tab.addEventListener('click', () => {
-    setSelectedConfigFilter(tab.dataset.filter);
-    if (snapshot) {
-      renderCards(snapshot);
-    }
-  });
-}
 
 document.addEventListener('click', async event => {
   const refreshConfigTokenButton = event.target.closest('[data-action="refresh-config-token"]');

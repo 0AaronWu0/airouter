@@ -124,6 +124,7 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.doesNotMatch(html, /window\.confirm/);
   assert.ok(accessControlSection, 'access control section should be present');
   assert.match(accessControlSection, /id="addApiKeyButton"/);
+  assert.match(html, /id="apiKeyRateInput"/);
 });
 
 test('buildRuntimeSyncText describes idle, polling, and synced runtime states', () => {

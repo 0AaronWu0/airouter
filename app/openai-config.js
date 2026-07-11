@@ -252,6 +252,7 @@ function createTokenRuntimeConfig(config, index) {
 function createApiKeyRuntimeConfig(config, index) {
     const apikey = normalizeString(config && config.apikey);
     const baseUrl = normalizeString(config && config.base_url).replace(/\/+$/, '');
+    const rate = normalizeString(config && config.rate);
 
     if (!apikey || !baseUrl) {
         throw new Error('apikey 配置至少需要 apikey 和 base_url');
@@ -264,6 +265,7 @@ function createApiKeyRuntimeConfig(config, index) {
         apiBasePath: '',
         apiKey: apikey,
         support: normalizeApiKeySupport(config.support),
+        rate,
         description: config.description || `APIKey 配置 #${index + 1}`,
         runtime: createDefaultApiKeyRuntime()
     };
@@ -298,6 +300,10 @@ function shouldUseQuotaMonitoring(type) {
     return type === 'token';
 }
 
+function isApiModeAutoSwitchEnabled(parsed) {
+    return Boolean(parsed && parsed.api_mode_auto_switch);
+}
+
 module.exports = {
     CHATGPT_BASE_URL,
     CODEX_API_BASE_PATH,
@@ -313,5 +319,6 @@ module.exports = {
     normalizeApiKeySupport,
     configSupportsCapability,
     buildAuthHeadersForConfig,
-    shouldUseQuotaMonitoring
+    shouldUseQuotaMonitoring,
+    isApiModeAutoSwitchEnabled
 };

@@ -12,8 +12,26 @@ const {
   refreshConfigTokenAdminResponse,
   reportBusinessRequestError,
   registerProcessSafetyHandlers,
+  selectApiModeAutoSwitchTarget,
   selectReloadedActiveConfig,
 } = require('../openai');
+
+test('selectApiModeAutoSwitchTarget chooses the lowest available low-rate apikey', () => {
+  const configs = [
+    { type: 'apikey', rate: '0.17', runtime: { available: true } },
+    { type: 'apikey', rate: '0.1', runtime: { available: true } },
+    { type: 'apikey', rate: '0.05', runtime: { available: false } },
+  ];
+
+  assert.equal(selectApiModeAutoSwitchTarget(configs, configs[0]), configs[1]);
+});
+
+test('selectApiModeAutoSwitchTarget only switches from an apikey config', () => {
+  const tokenConfig = { type: 'token', runtime: { available: true } };
+  const apikeyConfig = { type: 'apikey', rate: '0.1', runtime: { available: true } };
+
+  assert.equal(selectApiModeAutoSwitchTarget([apikeyConfig], tokenConfig), null);
+});
 
 test('refreshConfigAdminResponse refreshes all quotas before building the admin snapshot in token mode', async () => {
   const calls = [];

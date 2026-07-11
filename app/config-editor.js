@@ -98,9 +98,22 @@ function normalizePortSetting(value, fieldName, options = {}) {
     return port;
 }
 
+function normalizeRate(value) {
+    const normalized = normalizeString(value);
+    if (!normalized) {
+        return '';
+    }
+
+    if (!/^\d+(\.\d+)?$/.test(normalized)) {
+        throw new ConfigEditorError('apikey 倍率必须是数字，例如 0.1 或 0.17');
+    }
+
+    return normalized;
+}
+
 function getEditableFields(type) {
     if (type === 'apikey') {
-        return ['type', 'apikey', 'base_url', 'description', 'support'];
+        return ['type', 'apikey', 'base_url', 'description', 'support', 'rate'];
     }
 
     if (type === 'token') {
@@ -151,7 +164,7 @@ function normalizeConfigItem(item, existingItem = {}) {
     const type = getConfigItemType(nextItem);
 
     for (const field of getEditableFields(type)) {
-        if (field === 'support') {
+        if (field === 'support' || field === 'rate') {
             continue;
         }
 
@@ -169,6 +182,12 @@ function normalizeConfigItem(item, existingItem = {}) {
     if (type === 'apikey') {
         nextItem.type = 'apikey';
         nextItem.base_url = nextItem.base_url.replace(/\/+$/, '');
+        if (Object.prototype.hasOwnProperty.call(item, 'rate')) {
+            nextItem.rate = normalizeRate(item.rate);
+            if (!nextItem.rate) {
+                delete nextItem.rate;
+            }
+        }
         if (Object.prototype.hasOwnProperty.call(item, 'support')) {
             nextItem.support = normalizeApiKeySupport(item.support);
         }
@@ -317,6 +336,10 @@ function updateConfigSettings(parsed, settings) {
         }
 
         nextParsed.responses = mergedResponses;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(settings, 'api_mode_auto_switch')) {
+        nextParsed.api_mode_auto_switch = Boolean(settings.api_mode_auto_switch);
     }
 
     return validateParsedConfig(nextParsed);
