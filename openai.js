@@ -61,7 +61,6 @@ const CONTROL_REQUEST_FILE = process.env.AIROUTER_CONTROL_REQUEST_FILE || '';
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';
 const QUOTA_CHECK_INTERVAL_MS = 1 * 60 * 1000;
 const API_MODE_AUTO_SWITCH_INTERVAL_MS = 5 * 60 * 1000;
-const API_MODE_LOW_RATE_THRESHOLD = 0.1;
 const MIN_REMAINING_PERCENT = 3;
 const MIN_WEEKLY_REMAINING_PERCENT = 1;
 const HOP_BY_HOP_HEADERS = new Set([
@@ -454,9 +453,9 @@ function getConfigRate(config) {
     return Number.isFinite(rate) ? rate : null;
 }
 
-function isLowRateApiModeConfig(config) {
+function isRateConfiguredApiKey(config) {
     const rate = getConfigRate(config);
-    return Boolean(config && config.type === 'apikey' && rate !== null && rate <= API_MODE_LOW_RATE_THRESHOLD);
+    return Boolean(config && config.type === 'apikey' && rate !== null);
 }
 
 function selectApiModeAutoSwitchTarget(configs, activeConfig, getAccountStatus = () => null) {
@@ -472,7 +471,7 @@ function selectApiModeAutoSwitchTarget(configs, activeConfig, getAccountStatus =
     let target = null;
     let targetRate = activeRate;
     for (const config of configs || []) {
-        if (!isLowRateApiModeConfig(config)) {
+        if (!isRateConfiguredApiKey(config)) {
             continue;
         }
 
@@ -515,7 +514,7 @@ async function probeApiKeyConfig(config) {
     return false;
 }
 
-async function refreshLowRateApiModeConfigs() {
+async function refreshApiModeConfigs() {
     if (!apiModeAutoSwitchEnabled || !accountManager || apiModeAutoSwitchRunning) {
         return;
     }
@@ -523,7 +522,7 @@ async function refreshLowRateApiModeConfigs() {
     apiModeAutoSwitchRunning = true;
     try {
         for (const config of apiConfigs) {
-            if (isLowRateApiModeConfig(config) && config.runtime && config.runtime.available === false) {
+            if (isRateConfiguredApiKey(config) && config.runtime && config.runtime.available === false) {
                 try {
                     const recovered = await probeApiKeyConfig(config);
                     if (recovered) {
@@ -563,9 +562,9 @@ function startApiModeAutoSwitchMonitor() {
     }
 
     apiModeAutoSwitchTimer = setInterval(() => {
-        void refreshLowRateApiModeConfigs();
+        void refreshApiModeConfigs();
     }, API_MODE_AUTO_SWITCH_INTERVAL_MS);
-    void refreshLowRateApiModeConfigs();
+    void refreshApiModeConfigs();
 }
 
 function isResponsesFailoverInspectionCandidate(statusCode, headers) {

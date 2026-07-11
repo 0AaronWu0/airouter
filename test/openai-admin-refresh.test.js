@@ -16,11 +16,11 @@ const {
   selectReloadedActiveConfig,
 } = require('../openai');
 
-test('selectApiModeAutoSwitchTarget chooses the lowest available low-rate apikey', () => {
+test('selectApiModeAutoSwitchTarget chooses the lowest available lower-rate apikey', () => {
   const configs = [
     { type: 'apikey', rate: '0.17', runtime: { available: true } },
-    { type: 'apikey', rate: '0.1', runtime: { available: true } },
-    { type: 'apikey', rate: '0.05', runtime: { available: false } },
+    { type: 'apikey', rate: '0.15', runtime: { available: true } },
+    { type: 'apikey', rate: '0.12', runtime: { available: false } },
   ];
 
   assert.equal(selectApiModeAutoSwitchTarget(configs, configs[0]), configs[1]);
