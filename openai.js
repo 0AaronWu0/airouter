@@ -39,6 +39,7 @@ const {
     deleteConfigItem,
     moveConfigItem,
     readParsedConfigFile,
+    updateConfigItem,
     updateConfigSettings,
     writeParsedConfigFile
 } = require('./app/config-editor');
@@ -1067,7 +1068,10 @@ function serializeAccountStatus(accountStatus) {
 }
 
 function buildConfigAdminResponse() {
-    const activeConfig = accountManager ? accountManager.getActiveConfig() : null;
+    const openAiRoutePredicate = item => item.type === 'token' || (apiModeAutoSwitchEnabled && configSupportsCapability(item, 'gpt'));
+    const activeConfig = accountManager
+        ? accountManager.getActiveConfig(openAiRoutePredicate) || accountManager.ensureActiveConfig('admin_snapshot', openAiRoutePredicate)
+        : null;
     const activeAccountStatus = accountManager ? accountManager.getAccountStatus(activeConfig) : null;
     const configuredApiKeys = getConfiguredApiKeys(currentParsedConfig);
 
@@ -2046,6 +2050,38 @@ app.post('/admin/api/configs', async (req, res) => {
         const statusCode = err instanceof ConfigEditorError ? 400 : 500;
         res.status(statusCode).json({
             error: statusCode === 400 ? '配置新增失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
+app.put('/admin/api/configs/:index', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const targetIndex = parseConfigIndex(req.params.index);
+        const rawItem = parseConfigItemJson(req.body && req.body.raw_json);
+        const configType = req.body && typeof req.body.config_type === 'string'
+            ? req.body.config_type.trim()
+            : '';
+        const inputItem = configType
+            ? buildImportedConfigItem(configType, rawItem)
+            : buildImportedConfigItem(rawItem);
+        const existingItem = parsed.configs[targetIndex];
+        const nextItem = {
+            ...inputItem,
+            created_at: existingItem.created_at || inputItem.created_at || new Date().toISOString()
+        };
+        const validatedRuntimeConfig = await validateConfigItemBeforeAdd(null, nextItem);
+        const nextParsed = updateConfigItem(parsed, targetIndex, nextItem);
+        await persistAndReloadConfig(nextParsed, 'admin_update_config', {
+            runtimeOverrides: [validatedRuntimeConfig],
+            skipQuotaRefresh: true
+        });
+        res.json(buildConfigAdminResponse());
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '配置编辑失败' : '配置更新失败',
             details: err.message
         });
     }

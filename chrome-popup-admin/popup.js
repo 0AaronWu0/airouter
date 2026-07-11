@@ -31,6 +31,8 @@ let snapshot = null;
 let settings = { ...DEFAULT_SETTINGS };
 let apiModeAutoSwitchEnabled = false;
 let selectedConfigFilter = '';
+let editingConfigIndex = null;
+const cancelEditConfigButton = document.querySelector('[data-action="cancel-edit-config"]');
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -232,6 +234,42 @@ function clearConfigForm() {
   document.querySelectorAll('input[name="apiKeySupport"]').forEach(input => {
     input.checked = input.value === 'gpt';
   });
+}
+
+function startEditConfig(index) {
+  const config = snapshot && snapshot.configs
+    ? snapshot.configs.find(item => item.index === Number(index))
+    : null;
+  if (!config) {
+    throw new Error('配置项不存在');
+  }
+
+  editingConfigIndex = config.index;
+  const item = config.item || {};
+  const mode = item.type === 'apikey' ? 'apikey' : 'token';
+  document.querySelector(`input[name="configMode"][value="${mode}"]`).checked = true;
+  if (mode === 'apikey') {
+    apiKeyBaseUrlInput.value = item.base_url || '';
+    apiKeyInput.value = item.apikey || '';
+    apiKeyDescriptionInput.value = item.description || '';
+    apiKeyRateInput.value = item.rate || '';
+    document.querySelectorAll('input[name="apiKeySupport"]').forEach(input => {
+      input.checked = Array.isArray(item.support) ? item.support.includes(input.value) : input.value === 'gpt';
+    });
+  } else {
+    rawJsonInput.value = JSON.stringify(item, null, 2);
+  }
+  updateConfigMode();
+  addConfigButton.textContent = '保存修改';
+  if (cancelEditConfigButton) cancelEditConfigButton.hidden = false;
+}
+
+function cancelEditConfig() {
+  editingConfigIndex = null;
+  clearConfigForm();
+  addConfigButton.textContent = '直接新增';
+  if (cancelEditConfigButton) cancelEditConfigButton.hidden = true;
+  updateConfigMode();
 }
 
 function renderSwitchButton(item) {
@@ -461,6 +499,7 @@ function renderCards(data) {
             <div class="config-runtime-line">${escapeHtml(formatRuntimeSummary(item))}</div>
             <div class="config-button-group">
               ${renderRefreshTokenButton(item)}
+              <button class="button secondary inline-edit" type="button" data-action="edit-config" data-index="${item.index}">编辑</button>
               <button class="button danger inline-danger" type="button" data-action="delete-config" data-index="${item.index}">删除</button>
             </div>
           </div>
@@ -514,9 +553,10 @@ async function loadSnapshot(message = '') {
 
 async function addConfig() {
   const configItem = buildConfigItemFromInputs();
+  const editing = editingConfigIndex !== null;
   const configMode = getSelectedConfigMode();
-  const result = await requestJson('/admin/api/configs', {
-    method: 'POST',
+  const result = await requestJson(editing ? `/admin/api/configs/${editingConfigIndex}` : '/admin/api/configs', {
+    method: editing ? 'PUT' : 'POST',
     body: JSON.stringify({
       raw_json: JSON.stringify(configItem),
       config_type: configMode
@@ -524,8 +564,11 @@ async function addConfig() {
   });
 
   clearConfigForm();
+  editingConfigIndex = null;
+  addConfigButton.textContent = '直接新增';
+  if (cancelEditConfigButton) cancelEditConfigButton.hidden = true;
   renderSnapshot(result);
-  setMessage('info', '配置项已写入配置文件。');
+  setMessage('info', editing ? '配置项已更新并热重载。' : '配置项已写入配置文件。');
 }
 
 async function addApiKey() {
@@ -674,6 +717,25 @@ for (const tab of configFilterTabs) {
 }
 
 document.addEventListener('click', async event => {
+  const editConfigButton = event.target.closest('[data-action="edit-config"]');
+  if (editConfigButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      startEditConfig(editConfigButton.dataset.index);
+    } catch (error) {
+      setMessage('error', error.message);
+    }
+    return;
+  }
+
+  const cancelEditButton = event.target.closest('[data-action="cancel-edit-config"]');
+  if (cancelEditButton) {
+    event.preventDefault();
+    cancelEditConfig();
+    return;
+  }
+
   const refreshConfigTokenButton = event.target.closest('[data-action="refresh-config-token"]');
   if (refreshConfigTokenButton) {
     event.preventDefault();

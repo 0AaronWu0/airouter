@@ -45,7 +45,7 @@ test('config admin shows upstream config before edit controls', () => {
   const messageIndex = html.indexOf('<div id="message"');
   const upstreamIndex = html.indexOf('<section class="panel list-panel">');
   const consoleGridIndex = html.indexOf('<section class="console-grid">');
-  const addConfigIndex = html.indexOf('<h2 class="panel-title">新增配置项</h2>');
+  const addConfigIndex = html.indexOf('id="configEditorTitle"');
 
   assert.ok(messageIndex >= 0, 'message area should be present');
   assert.ok(upstreamIndex > messageIndex, 'upstream config should follow the message area');
@@ -57,6 +57,9 @@ test('config admin exposes manual runtime config activation controls', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
 
   assert.match(html, /data-action="activate"/);
+  assert.match(html, /data-action="edit"/);
+  assert.match(html, /id="cancelEditButton"/);
+  assert.match(html, /method: editing \? 'PUT' : 'POST'/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/activate/);
   assert.match(html, /当前账号已临时切换/);
 });

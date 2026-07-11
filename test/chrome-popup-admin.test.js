@@ -54,3 +54,10 @@ test('chrome popup renders apikey rate and puts the active config first', () => 
   assert.match(popupScript, /left\?\.is_active \? -1 : 1/);
   assert.match(popupScript, /Number\(left\?\.index \?\? 0\) - Number\(right\?\.index \?\? 0\)/);
 });
+
+test('chrome popup exposes config editing controls and update request', () => {
+  assert.match(popupHtml, /data-action="cancel-edit-config"/);
+  assert.match(popupScript, /data-action="edit-config"/);
+  assert.match(popupScript, /method: editing \? 'PUT' : 'POST'/);
+  assert.match(popupScript, /配置项已更新并热重载/);
+});

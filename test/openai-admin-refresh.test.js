@@ -33,6 +33,17 @@ test('selectApiModeAutoSwitchTarget only switches from an apikey config', () => 
   assert.equal(selectApiModeAutoSwitchTarget([apikeyConfig], tokenConfig), null);
 });
 
+test('admin snapshot marks the active config used by the OpenAI route', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const functionStart = source.indexOf('function buildConfigAdminResponse()');
+  const functionEnd = source.indexOf('async function refreshConfigAdminResponse', functionStart);
+  const functionSource = source.slice(functionStart, functionEnd);
+
+  assert.match(functionSource, /openAiRoutePredicate/);
+  assert.match(functionSource, /getActiveConfig\(openAiRoutePredicate\)/);
+  assert.match(functionSource, /ensureActiveConfig\('admin_snapshot', openAiRoutePredicate\)/);
+});
+
 test('refreshConfigAdminResponse refreshes all quotas before building the admin snapshot in token mode', async () => {
   const calls = [];
   const manager = {
@@ -163,6 +174,18 @@ test('admin reorder route moves the selected config to the top', () => {
   assert.match(routeSource, /moveConfigItem\(parsed,\s*targetIndex,\s*0\)/);
   assert.match(routeSource, /preserveActiveConfig:\s*true/);
   assert.doesNotMatch(routeSource, /accountManager\.activateConfig\(0,\s*'admin_move_config'\)/);
+});
+
+test('admin config edit route updates an existing config through the config editor', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const routeStart = source.indexOf("app.put('/admin/api/configs/:index'");
+  const routeEnd = source.indexOf("app.post('/admin/api/apikeys'", routeStart);
+  const routeSource = routeStart >= 0 && routeEnd > routeStart
+    ? source.slice(routeStart, routeEnd)
+    : '';
+
+  assert.match(routeSource, /updateConfigItem\(parsed, targetIndex, nextItem\)/);
+  assert.match(routeSource, /preserve|created_at/);
 });
 
 test('refreshConfigTokenAdminResponse refreshes and persists a token config', async () => {
