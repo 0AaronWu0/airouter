@@ -3,15 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenAIRouter Admin</title>
+  <title>AIRouter Admin</title>
   <link rel="stylesheet" href="./popup.css">
 </head>
 <body>
   <main class="page">
     <section class="panel hero">
       <div class="hero-head">
-        <h1>OpenAIRouter</h1>
+        <h1>AIRouter</h1>
         <div class="actions toolbar-actions">
+          <button id="apiModeAutoSwitchButton" class="button toggle-switch is-off" type="button" aria-pressed="false">API 模式</button>
           <button id="openAdminButton" class="button linklike" type="button">打开后管</button>
           <button id="startServiceButton" class="button start" type="button">启动</button>
           <button id="restartServiceButton" class="button restart" type="button">重启</button>
@@ -20,6 +21,11 @@
       </div>
       <div class="section-head">
         <h2>配置列表</h2>
+        <div class="config-filter-tabs" role="tablist" aria-label="配置筛选">
+          <button class="config-filter-tab" type="button" data-filter="all">全部</button>
+          <button class="config-filter-tab" type="button" data-filter="token">账号</button>
+          <button class="config-filter-tab" type="button" data-filter="apikey">API</button>
+        </div>
       </div>
       <div id="cards"></div>
     </section>
@@ -127,6 +133,10 @@
               <label class="field">
                 <span class="field-label">备注</span>
                 <input id="apiKeyDescriptionInput" type="text" placeholder="例如：备用上游">
+              </label>
+              <label class="field">
+                <span class="field-label">倍率</span>
+                <input id="apiKeyRateInput" type="text" inputmode="decimal" placeholder="0.1">
               </label>
               <div class="field">
                 <span class="field-label">Support</span>
