@@ -389,6 +389,11 @@ textarea {
   color: var(--accent);
 }
 
+.badge.rate {
+  background: rgba(28, 41, 52, 0.08);
+  color: var(--muted);
+}
+
 .message {
   display: none;
   margin-top: 12px;

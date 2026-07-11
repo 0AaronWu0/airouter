@@ -149,11 +149,16 @@ function getConfigType(item) {
 }
 
 function getVisibleConfigs(configs) {
-  if (selectedConfigFilter === 'all') {
-    return configs;
-  }
+  const filtered = selectedConfigFilter === 'all'
+    ? configs
+    : configs.filter(item => getConfigType(item) === selectedConfigFilter);
 
-  return configs.filter(item => getConfigType(item) === selectedConfigFilter);
+  return [...filtered].sort((left, right) => {
+    if (Boolean(left?.is_active) !== Boolean(right?.is_active)) {
+      return left?.is_active ? -1 : 1;
+    }
+    return Number(left?.index ?? 0) - Number(right?.index ?? 0);
+  });
 }
 
 function getSelectedConfigMode() {
@@ -327,6 +332,14 @@ function renderRuntimeHighlights(item) {
   return cards ? `<div class="metric-group">${cards}</div>` : '';
 }
 
+function renderApiKeyRate(item) {
+  if (!isApiKeyConfig(item) || !item?.item?.rate) {
+    return '';
+  }
+
+  return `<span class="badge rate">倍率 ${escapeHtml(item.item.rate)}</span>`;
+}
+
 function formatRuntimeSummary(item) {
   const runtimeSummary = item?.runtime?.runtime_summary || '暂无运行态数据';
   const normalized = String(runtimeSummary || '暂无运行态数据').trim();
@@ -434,6 +447,7 @@ function renderCards(data) {
                 </div>
                 <div class="config-status-row">
                   ${runtimeBadge(item)}
+                  ${renderApiKeyRate(item)}
                   ${renderRuntimeHighlights(item)}
                 </div>
               </div>

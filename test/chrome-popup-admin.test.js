@@ -45,3 +45,11 @@ test('chrome popup exposes API mode toggle, filters, and AIRouter branding', () 
   assert.match(popupHtml, /id="apiKeyRateInput"/);
   assert.match(popupScript, /api_mode_auto_switch/);
 });
+
+test('chrome popup renders apikey rate and puts the active config first', () => {
+  assert.match(popupScript, /function renderApiKeyRate\(item\)/);
+  assert.match(popupScript, /item\.item\.rate/);
+  assert.match(popupScript, /class="badge rate"/);
+  assert.match(popupScript, /left\?\.is_active \? -1 : 1/);
+  assert.match(popupScript, /Number\(left\?\.index \?\? 0\) - Number\(right\?\.index \?\? 0\)/);
+});

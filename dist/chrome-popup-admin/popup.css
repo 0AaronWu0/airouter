@@ -229,6 +229,7 @@ textarea {
 .toolbar-actions {
   margin-top: 0;
   align-items: center;
+  flex-wrap: nowrap;
 }
 
 .actions.compact {
@@ -300,6 +301,63 @@ textarea {
   color: #2f63e5;
 }
 
+.button.toggle-switch {
+  min-height: 36px;
+  padding: 0 14px 0 34px;
+  position: relative;
+  font-weight: 700;
+  color: #5f6872;
+  background: rgba(28, 41, 52, 0.12);
+}
+
+.button.toggle-switch::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #8b949e;
+  transition: background 140ms ease, transform 140ms ease;
+}
+
+.button.toggle-switch.is-on {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.button.toggle-switch.is-on::before {
+  background: var(--success);
+}
+
+.config-filter-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.config-filter-tab {
+  appearance: none;
+  border: 0;
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.config-filter-tab.is-active {
+  background: rgba(28, 41, 52, 0.1);
+  color: var(--text);
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -329,6 +387,11 @@ textarea {
 .badge.active {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+.badge.rate {
+  background: rgba(28, 41, 52, 0.08);
+  color: var(--muted);
 }
 
 .message {
@@ -603,7 +666,7 @@ textarea {
 
 .metric-group {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
 }
 
