@@ -444,10 +444,10 @@ function renderCards(data) {
                 <div class="config-title-row">
                   <span>配置 #${item.index + 1}</span>
                   <span class="config-identity mono">${escapeHtml(getConfigIdentity(item))}</span>
+                  ${renderApiKeyRate(item)}
                 </div>
                 <div class="config-status-row">
                   ${runtimeBadge(item)}
-                  ${renderApiKeyRate(item)}
                   ${renderRuntimeHighlights(item)}
                 </div>
               </div>
