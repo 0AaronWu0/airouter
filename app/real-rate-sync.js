@@ -89,8 +89,9 @@ function inferGroupName(config, groups) {
 
 async function fetchRealApiKeyRates(options = {}) {
     const baseUrl = options.baseUrl || `https://${TARGET_HOST}`;
-    const credentials = options.credentials || getSiteCredentials(options.loginFile);
-    if (!credentials) throw new Error(`未找到 ${TARGET_HOST} 登录配置`);
+    const host = options.host || TARGET_HOST;
+    const credentials = options.credentials || getSiteCredentials(options.loginFile, host);
+    if (!credentials) throw new Error(`未找到 ${host} 登录配置`);
 
     let sessionCookie = options.sessionCookie || '';
     let userId = options.userId || '';

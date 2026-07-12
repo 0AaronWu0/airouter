@@ -467,17 +467,30 @@ function getLocalRate(config) {
 async function refreshRealApiKeyRates() {
     if (realRateSyncRunning) return;
     const usAiTargets = apiConfigs.filter(config => config.type === 'apikey' && config.baseUrl.includes('us-ai3.twskyhope.top'));
+    const codePlanTargets = apiConfigs.filter(config => config.type === 'apikey' && config.baseUrl.includes('code-plan.site'));
     const hanheTargets = apiConfigs.filter(config => config.type === 'apikey' && config.baseUrl.includes('api.hanhegufei.online'));
-    if (!usAiTargets.length && !hanheTargets.length) return;
+    if (!usAiTargets.length && !codePlanTargets.length && !hanheTargets.length) return;
 
     realRateSyncRunning = true;
     try {
-        const results = [];
+        const syncTasks = [];
         if (usAiTargets.length) {
-            results.push(await fetchRealApiKeyRates({ configs: usAiTargets, timeoutMs: QUOTA_CHECK_TIMEOUT_MS }));
+            syncTasks.push(fetchRealApiKeyRates({ host: 'us-ai3.twskyhope.top', configs: usAiTargets, timeoutMs: QUOTA_CHECK_TIMEOUT_MS }));
+        }
+        if (codePlanTargets.length) {
+            syncTasks.push(fetchRealApiKeyRates({ host: 'code-plan.site', baseUrl: 'https://code-plan.site', configs: codePlanTargets, timeoutMs: QUOTA_CHECK_TIMEOUT_MS }));
         }
         if (hanheTargets.length) {
-            results.push(await fetchHanheApiKeyRates({ configs: hanheTargets, timeoutMs: QUOTA_CHECK_TIMEOUT_MS }));
+            syncTasks.push(fetchHanheApiKeyRates({ configs: hanheTargets, timeoutMs: QUOTA_CHECK_TIMEOUT_MS }));
+        }
+        const settledResults = await Promise.allSettled(syncTasks);
+        const results = settledResults
+            .filter(result => result.status === 'fulfilled')
+            .map(result => result.value);
+        for (const result of settledResults) {
+            if (result.status === 'rejected') {
+                warn(`单站点真实倍率同步失败，继续处理其他站点: ${result.reason.message}`);
+            }
         }
         let synced = 0;
         for (const result of results) {
@@ -488,7 +501,7 @@ async function refreshRealApiKeyRates() {
                 }
             }
         }
-        log(`真实倍率同步完成: ${synced}/${usAiTargets.length + hanheTargets.length}`);
+        log(`真实倍率同步完成: ${synced}/${usAiTargets.length + codePlanTargets.length + hanheTargets.length}`);
     } catch (error) {
         warn(`真实倍率同步失败，继续使用本地倍率: ${error.message}`);
     } finally {
