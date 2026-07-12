@@ -44,6 +44,7 @@ const {
     writeParsedConfigFile
 } = require('./app/config-editor');
 const { reconcileRuntimeConfigs } = require('./app/runtime-config-reconciler');
+const { fetchRealApiKeyRates } = require('./app/real-rate-sync');
 const {
     generateRandomSecret,
     getConfiguredApiKeys,
@@ -62,6 +63,7 @@ const CONTROL_REQUEST_FILE = process.env.AIROUTER_CONTROL_REQUEST_FILE || '';
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';
 const QUOTA_CHECK_INTERVAL_MS = 1 * 60 * 1000;
 const API_MODE_AUTO_SWITCH_INTERVAL_MS = 5 * 60 * 1000;
+const REAL_RATE_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const MIN_REMAINING_PERCENT = 3;
 const MIN_WEEKLY_REMAINING_PERCENT = 1;
 const HOP_BY_HOP_HEADERS = new Set([
@@ -193,6 +195,8 @@ let shuttingDown = false;
 let apiModeAutoSwitchEnabled = false;
 let apiModeAutoSwitchTimer = null;
 let apiModeAutoSwitchRunning = false;
+let realRateSyncTimer = null;
+let realRateSyncRunning = false;
 const activeSockets = new Set();
 
 // ==================== 工具函数 ====================
@@ -450,8 +454,53 @@ function classifyApiKeyUpstreamFailure(config, statusCode) {
 }
 
 function getConfigRate(config) {
+    const realRate = config && config.runtime && config.runtime.realRate;
+    const rate = Number(typeof realRate === 'number' ? realRate : config && config.rate);
+    return Number.isFinite(rate) ? rate : null;
+}
+
+function getLocalRate(config) {
     const rate = Number(config && config.rate);
     return Number.isFinite(rate) ? rate : null;
+}
+
+async function refreshRealApiKeyRates() {
+    if (realRateSyncRunning) return;
+    const targets = apiConfigs.filter(config => config.type === 'apikey' && config.baseUrl.includes('us-ai3.twskyhope.top'));
+    if (!targets.length) return;
+
+    realRateSyncRunning = true;
+    try {
+        const result = await fetchRealApiKeyRates({
+            configs: targets,
+            timeoutMs: QUOTA_CHECK_TIMEOUT_MS,
+        });
+        for (const config of targets) {
+            if (Object.prototype.hasOwnProperty.call(result.rates, config.index)) {
+                config.runtime.realRate = result.rates[config.index];
+            }
+        }
+        log(`真实倍率同步完成: ${Object.keys(result.rates).length}/${targets.length}`);
+    } catch (error) {
+        warn(`真实倍率同步失败，继续使用本地倍率: ${error.message}`);
+    } finally {
+        realRateSyncRunning = false;
+    }
+}
+
+function stopRealRateSyncMonitor() {
+    if (realRateSyncTimer) {
+        clearInterval(realRateSyncTimer);
+        realRateSyncTimer = null;
+    }
+}
+
+function startRealRateSyncMonitor() {
+    stopRealRateSyncMonitor();
+    realRateSyncTimer = setInterval(() => {
+        void refreshRealApiKeyRates();
+    }, REAL_RATE_SYNC_INTERVAL_MS);
+    void refreshRealApiKeyRates();
 }
 
 function isRateConfiguredApiKey(config) {
@@ -827,6 +876,7 @@ function applyLoadedConfig(loadedConfig) {
         accountManager.stopQuotaMonitor();
     }
     stopApiModeAutoSwitchMonitor();
+    stopRealRateSyncMonitor();
 
     accountManager = createAccountManager({
         configs: apiConfigs,
@@ -851,6 +901,7 @@ function applyLoadedConfig(loadedConfig) {
     });
     handleClaudeMessagesRequest = createClaudeMessagesRequestHandler();
     startApiModeAutoSwitchMonitor();
+    startRealRateSyncMonitor();
 }
 
 function hydrateLoadedConfig(loadedConfig, options = {}) {
@@ -1090,7 +1141,9 @@ function buildConfigAdminResponse() {
         active_config_index: activeAccountStatus ? activeAccountStatus.index : null,
         configs: currentParsedConfig.configs.map((item, index) => ({
             index,
-            item,
+            item: apiConfigs[index]?.type === 'apikey' && apiConfigs[index]?.runtime?.realRate !== null
+                ? { ...item, rate: apiConfigs[index].runtime.realRate }
+                : item,
             is_active: activeAccountStatus ? activeAccountStatus.index === index : false,
             runtime: apiConfigs[index] ? serializeAccountStatus(accountManager.getAccountStatus(apiConfigs[index])) : null
         }))
@@ -1836,6 +1889,7 @@ function shutdownServer(reason) {
     log(`${reason}，正在关闭服务器...`);
     stopControlWatcher();
     stopApiModeAutoSwitchMonitor();
+    stopRealRateSyncMonitor();
 
     if (accountManager) {
         accountManager.stopQuotaMonitor();
