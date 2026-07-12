@@ -39,7 +39,8 @@ function createDefaultApiKeyRuntime() {
         secondaryResetAt: null,
         secondaryResetAfterSeconds: null,
         reason: 'apikey',
-        lastError: null
+        lastError: null,
+        realRate: null
     };
 }
 

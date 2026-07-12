@@ -1141,7 +1141,7 @@ function buildConfigAdminResponse() {
         active_config_index: activeAccountStatus ? activeAccountStatus.index : null,
         configs: currentParsedConfig.configs.map((item, index) => ({
             index,
-            item: apiConfigs[index]?.type === 'apikey' && apiConfigs[index]?.runtime?.realRate !== null
+            item: apiConfigs[index]?.type === 'apikey' && typeof apiConfigs[index]?.runtime?.realRate === 'number'
                 ? { ...item, rate: apiConfigs[index].runtime.realRate }
                 : item,
             is_active: activeAccountStatus ? activeAccountStatus.index === index : false,
