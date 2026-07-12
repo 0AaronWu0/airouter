@@ -44,7 +44,7 @@ const {
     writeParsedConfigFile
 } = require('./app/config-editor');
 const { reconcileRuntimeConfigs } = require('./app/runtime-config-reconciler');
-const { fetchRealApiKeyRates } = require('./app/real-rate-sync');
+const { fetchRealApiKeyRates, fetchHanheApiKeyRates } = require('./app/real-rate-sync');
 const {
     generateRandomSecret,
     getConfiguredApiKeys,
@@ -466,21 +466,29 @@ function getLocalRate(config) {
 
 async function refreshRealApiKeyRates() {
     if (realRateSyncRunning) return;
-    const targets = apiConfigs.filter(config => config.type === 'apikey' && config.baseUrl.includes('us-ai3.twskyhope.top'));
-    if (!targets.length) return;
+    const usAiTargets = apiConfigs.filter(config => config.type === 'apikey' && config.baseUrl.includes('us-ai3.twskyhope.top'));
+    const hanheTargets = apiConfigs.filter(config => config.type === 'apikey' && config.baseUrl.includes('api.hanhegufei.online'));
+    if (!usAiTargets.length && !hanheTargets.length) return;
 
     realRateSyncRunning = true;
     try {
-        const result = await fetchRealApiKeyRates({
-            configs: targets,
-            timeoutMs: QUOTA_CHECK_TIMEOUT_MS,
-        });
-        for (const config of targets) {
-            if (Object.prototype.hasOwnProperty.call(result.rates, config.index)) {
-                config.runtime.realRate = result.rates[config.index];
+        const results = [];
+        if (usAiTargets.length) {
+            results.push(await fetchRealApiKeyRates({ configs: usAiTargets, timeoutMs: QUOTA_CHECK_TIMEOUT_MS }));
+        }
+        if (hanheTargets.length) {
+            results.push(await fetchHanheApiKeyRates({ configs: hanheTargets, timeoutMs: QUOTA_CHECK_TIMEOUT_MS }));
+        }
+        let synced = 0;
+        for (const result of results) {
+            for (const config of apiConfigs) {
+                if (Object.prototype.hasOwnProperty.call(result.rates, config.index)) {
+                    config.runtime.realRate = result.rates[config.index];
+                    synced += 1;
+                }
             }
         }
-        log(`真实倍率同步完成: ${Object.keys(result.rates).length}/${targets.length}`);
+        log(`真实倍率同步完成: ${synced}/${usAiTargets.length + hanheTargets.length}`);
     } catch (error) {
         warn(`真实倍率同步失败，继续使用本地倍率: ${error.message}`);
     } finally {

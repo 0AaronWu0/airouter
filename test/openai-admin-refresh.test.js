@@ -33,6 +33,13 @@ test('selectApiModeAutoSwitchTarget only switches from an apikey config', () => 
   assert.equal(selectApiModeAutoSwitchTarget([apikeyConfig], tokenConfig), null);
 });
 
+test('real rate sync supports Hanhe group rate multiplier responses', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'app', 'real-rate-sync.js'), 'utf8');
+  assert.match(source, /api\/v1\/auth\/login/);
+  assert.match(source, /api\/v1\/keys/);
+  assert.match(source, /group\?\.rate_multiplier/);
+});
+
 test('admin snapshot marks the active config used by the OpenAI route', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
   const functionStart = source.indexOf('function buildConfigAdminResponse()');

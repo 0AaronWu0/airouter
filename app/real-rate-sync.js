@@ -6,11 +6,14 @@ const TARGET_HOST = 'us-ai3.twskyhope.top';
 const LOGIN_PATH = '/api/user/login?turnstile=';
 const TOKEN_PATH = '/api/token/?p=1&size=100';
 const GROUP_PATH = '/api/user/self/groups';
+const HANHE_HOST = 'api.hanhegufei.online';
+const HANHE_LOGIN_PATH = '/api/v1/auth/login';
+const HANHE_KEYS_PATH = '/api/v1/keys?page=1&page_size=100&sort_by=created_at&sort_order=desc&timezone=Asia%2FShanghai';
 
-function getSiteCredentials(loginFile = LOGIN_FILE) {
+function getSiteCredentials(loginFile = LOGIN_FILE, host = TARGET_HOST) {
     try {
         const parsed = JSON.parse(fs.readFileSync(loginFile, 'utf8'));
-        const site = parsed?.sites?.[TARGET_HOST];
+        const site = parsed?.sites?.[host];
         const username = typeof site?.username === 'string' ? site.username.trim() : '';
         const password = typeof site?.password === 'string' ? site.password : '';
         return username && password ? { username, password } : null;
@@ -137,4 +140,58 @@ async function fetchRealApiKeyRates(options = {}) {
     return { rates, sessionCookie, userId };
 }
 
-module.exports = { fetchRealApiKeyRates, getSiteCredentials, findMatchingToken };
+async function fetchHanheApiKeyRates(options = {}) {
+    const baseUrl = options.baseUrl || `https://${HANHE_HOST}`;
+    const credentials = options.credentials || getSiteCredentials(options.loginFile, HANHE_HOST);
+    if (!credentials) throw new Error(`未找到 ${HANHE_HOST} 登录配置`);
+
+    let accessToken = options.accessToken || '';
+    async function login() {
+        const result = await requestJson(baseUrl, HANHE_LOGIN_PATH, {
+            method: 'POST',
+            body: { email: credentials.username, password: credentials.password },
+            timeoutMs: options.timeoutMs,
+        });
+        const payload = parseJsonResponse(result, 'Hanhe 倍率登录');
+        const token = payload?.data?.access_token;
+        if (payload.code !== 0 && !token) throw new Error(payload.message || 'Hanhe 倍率登录失败');
+        return token;
+    }
+
+    if (!accessToken) accessToken = await login();
+    let keyResult = await requestJson(baseUrl, HANHE_KEYS_PATH, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeoutMs: options.timeoutMs,
+    });
+    if (keyResult.statusCode === 401 || keyResult.statusCode === 403) {
+        accessToken = await login();
+        keyResult = await requestJson(baseUrl, HANHE_KEYS_PATH, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+            timeoutMs: options.timeoutMs,
+        });
+    }
+
+    const payload = parseJsonResponse(keyResult, 'Hanhe Key 列表');
+    const items = payload?.data?.items || payload?.data || [];
+    const rates = {};
+    for (const config of options.configs || []) {
+        const target = normalizeApiKey(config.apiKey);
+        const list = Array.isArray(items) ? items : [];
+        const item = list.find(entry => normalizeApiKey(entry?.key || entry?.token) === target)
+            || list.find(entry => {
+                const configLabel = `${config.description || ''} ${config.baseUrl || ''}`.toLowerCase();
+                const itemLabel = `${entry?.name || ''} ${entry?.group?.name || ''}`.toLowerCase();
+                return configLabel.includes('pro') === itemLabel.includes('pro');
+            })
+            || (list.length === 1 ? list[0] : null);
+        const rate = item?.rate
+            ?? item?.ratio
+            ?? item?.group_ratio
+            ?? item?.price_ratio
+            ?? item?.group?.rate_multiplier;
+        if (typeof rate === 'number' && Number.isFinite(rate)) rates[config.index] = rate;
+    }
+    return { rates, accessToken };
+}
+
+module.exports = { fetchRealApiKeyRates, fetchHanheApiKeyRates, getSiteCredentials, findMatchingToken };
