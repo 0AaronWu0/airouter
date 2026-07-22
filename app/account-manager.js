@@ -27,6 +27,8 @@ function createAccountManager(options) {
     : 0;
   let quotaMonitorRunning = false;
   let quotaMonitorTimer = null;
+  let quotaRecoveryTimer = null;
+  const quotaRecoveryAttempts = new Map();
 
   /**
    * 生成日志里使用的账号标识。
@@ -82,6 +84,7 @@ function createAccountManager(options) {
       apikey_rate_limited: 'API Key 被限流',
       apikey_upstream_5xx: 'API Key 上游服务错误',
       apikey_upstream_error: 'API Key 上游请求失败',
+      disabled: '已禁用',
       [`remaining_below_${minRemainingPercent}%`]: `剩余额度低于 ${minRemainingPercent}%`,
       [`secondary_remaining_not_above_${minWeeklyRemainingPercent}%`]: `周额度不高于 ${minWeeklyRemainingPercent}%`,
       quota_check_failed: '额度检查失败',
@@ -95,13 +98,14 @@ function createAccountManager(options) {
    */
   function getRuntimeSummary(config) {
     const runtime = config.runtime;
+    const reason = config.enabled === false ? 'disabled' : runtime.reason;
     const parts = [
       `可用=${formatBooleanText(runtime.available)}`,
       `额度=${formatQuotaPercent(runtime.primaryRemainingPercent)}`,
       `刷新时间=${formatQuotaResetTime(runtime.primaryResetAt)}`,
       `周额度=${formatQuotaPercent(runtime.secondaryRemainingPercent)}`,
       `刷新时间=${formatQuotaResetTime(runtime.secondaryResetAt)}`,
-      `状态=${formatReasonText(runtime.reason)}`,
+      `状态=${formatReasonText(reason)}`,
     ];
 
     if (runtime.lastError) {
@@ -123,7 +127,8 @@ function createAccountManager(options) {
       index: config.index,
       description: config.description,
       label: getAccountLabel(config),
-      available: config.runtime.available,
+      available: isConfigAvailable(config),
+      enabled: config.enabled !== false,
       remainingPercent: config.runtime.remainingPercent,
       primaryRemainingPercent: config.runtime.primaryRemainingPercent,
       primaryResetAt: config.runtime.primaryResetAt,
@@ -132,7 +137,9 @@ function createAccountManager(options) {
       secondaryResetAt: config.runtime.secondaryResetAt,
       secondaryResetAfterSeconds: config.runtime.secondaryResetAfterSeconds,
       lastCheckedAt: config.runtime.lastCheckedAt,
-      reason: config.runtime.reason,
+      reason: config.enabled === false ? 'disabled' : config.runtime.reason,
+      runtimeReason: config.runtime.reason,
+      lastError: config.runtime.lastError,
       runtimeSummary: getRuntimeSummary(config),
       summaryLine: `${getAccountLabel(config)} | ${getRuntimeSummary(config)}`,
     };
@@ -270,7 +277,7 @@ function createAccountManager(options) {
     let available = true;
     let reason = 'ok';
 
-    if (subscriptionActiveSignal === false || paidPlanSignal === false || (hasPrimaryWindow && !hasSecondaryWindow && paidPlanSignal !== true)) {
+    if (subscriptionActiveSignal === false || (paidPlanSignal === false && !hasPrimaryWindow && !hasSecondaryWindow)) {
       available = false;
       reason = 'membership_expired';
     } else if (rateLimit.allowed === false) {
@@ -304,6 +311,7 @@ function createAccountManager(options) {
    * 将统一额度状态写回账号运行时对象。
    */
   function applyQuotaState(config, quotaState) {
+    const previousResetAt = getNextQuotaResetAt(config);
     config.runtime.available = quotaState.available;
     config.runtime.reason = quotaState.reason;
     config.runtime.lastCheckedAt = now();
@@ -315,6 +323,9 @@ function createAccountManager(options) {
     config.runtime.secondaryResetAt = quotaState.secondaryResetAt;
     config.runtime.secondaryResetAfterSeconds = quotaState.secondaryResetAfterSeconds;
     config.runtime.lastError = null;
+    if (previousResetAt !== getNextQuotaResetAt(config)) {
+      quotaRecoveryAttempts.delete(config.index);
+    }
   }
 
   /**
@@ -363,7 +374,57 @@ function createAccountManager(options) {
    * 判断账号当前是否可用。
    */
   function isConfigAvailable(config) {
-    return Boolean(config && config.runtime && config.runtime.enabled && config.runtime.available);
+    return Boolean(config && config.enabled !== false && config.runtime && config.runtime.enabled && config.runtime.available);
+  }
+
+  function getNextQuotaResetAt(config) {
+    const resetTimes = [config?.runtime?.primaryResetAt, config?.runtime?.secondaryResetAt]
+      .map(value => Number(value))
+      .filter(value => Number.isFinite(value) && value > 0);
+    return resetTimes.length ? Math.min(...resetTimes) : null;
+  }
+
+  function findNextQuotaRecoveryCandidate() {
+    return configs
+      .filter(config => shouldUseQuotaMonitoring(config.type) && config.enabled !== false && !isConfigAvailable(config))
+      .map(config => ({ config, resetAt: getNextQuotaResetAt(config) }))
+      .filter(({ config, resetAt }) => resetAt !== null && quotaRecoveryAttempts.get(config.index) !== resetAt)
+      .sort((left, right) => left.resetAt - right.resetAt || left.config.index - right.config.index)
+      .at(0) || null;
+  }
+
+  async function refreshQuotaRecoveryCandidate(candidate) {
+    if (!candidate) {
+      return;
+    }
+
+    quotaRecoveryAttempts.set(candidate.config.index, candidate.resetAt);
+    await refreshQuotas('quota_reset', {
+      refreshPredicate: config => config === candidate.config,
+    });
+    if (isConfigAvailable(candidate.config)) {
+      ensureActiveConfig('quota_reset', config => shouldUseQuotaMonitoring(config.type));
+    }
+    scheduleNextQuotaRecovery();
+  }
+
+  function scheduleNextQuotaRecovery() {
+    if (quotaRecoveryTimer) {
+      clearTimeout(quotaRecoveryTimer);
+      quotaRecoveryTimer = null;
+    }
+
+    const candidate = findNextQuotaRecoveryCandidate();
+    if (!candidate) {
+      return;
+    }
+
+    const delayMs = Math.max(0, candidate.resetAt * 1000 - now());
+    quotaRecoveryTimer = setTimeout(() => {
+      quotaRecoveryTimer = null;
+      void refreshQuotaRecoveryCandidate(candidate);
+    }, delayMs);
+    quotaRecoveryTimer.unref?.();
   }
 
   function findHighestPriorityAvailableConfigIndex(predicate = () => true) {
@@ -384,7 +445,7 @@ function createAccountManager(options) {
    */
   function getActiveConfig(predicate = () => true) {
     const currentConfig = configs[activeConfigIndex] || null;
-    return currentConfig && predicate(currentConfig) ? currentConfig : null;
+    return currentConfig && currentConfig.enabled !== false && predicate(currentConfig) ? currentConfig : null;
   }
 
   function activateConfig(index, reason = 'manual') {
@@ -394,6 +455,9 @@ function createAccountManager(options) {
 
     const previousConfig = configs[activeConfigIndex] || null;
     const nextConfig = configs[index];
+    if (nextConfig.enabled === false) {
+      throw new Error('配置项已禁用，请先启用后再切换');
+    }
     if (nextConfig.type === 'apikey') {
       nextConfig.runtime.available = true;
       nextConfig.runtime.reason = 'apikey';
@@ -518,7 +582,7 @@ function createAccountManager(options) {
 
       return nextConfig;
     }
-    if (currentConfig && predicate(currentConfig)) {
+    if (currentConfig && predicate(currentConfig) && currentConfig.enabled !== false) {
       warn(`没有可用账号，继续使用当前账号 ${getAccountLabel(currentConfig)} (${reason})`);
       return currentConfig;
     }
@@ -530,9 +594,15 @@ function createAccountManager(options) {
    * 刷新单个账号的额度状态。
    */
   async function checkSingleAccountQuota(config, options = {}) {
-    const { allowSwitch = true } = options;
+    const { allowSwitch = true, includeDisabled = false } = options;
 
     if (!shouldUseQuotaMonitoring(config.type)) {
+        return config.runtime;
+    }
+
+    if (config.enabled === false && !includeDisabled) {
+      config.runtime.available = false;
+      config.runtime.reason = 'disabled';
       return config.runtime;
     }
 
@@ -543,15 +613,18 @@ function createAccountManager(options) {
     }
 
     const targetUrl = new URL(quotaCheckPath, config.baseUrl).toString();
+    let lastStatusCode = null;
 
     try {
       let { result, payload } = await requestQuotaPayload(config, targetUrl);
+      lastStatusCode = Number(result.statusCode) || null;
       if (result.statusCode < 200 || result.statusCode >= 300) {
         const missingCredentials = isMissingCredentialsPayload(payload);
         if (isRefreshableQuotaAuthFailure(result, payload)) {
           const refreshed = await refreshConfigAccessToken(config);
           if (refreshed) {
             ({ result, payload } = await requestQuotaPayload(config, targetUrl));
+            lastStatusCode = Number(result.statusCode) || lastStatusCode;
             if (result.statusCode >= 200 && result.statusCode < 300) {
               applyQuotaPayload(config, payload, { allowSwitch });
               return config.runtime;
@@ -572,7 +645,10 @@ function createAccountManager(options) {
       config.runtime.available = false;
       config.runtime.reason = 'quota_check_failed';
       config.runtime.lastCheckedAt = now();
-      config.runtime.lastError = err.message;
+      const errorMessage = String(err?.message || err || '额度检查失败')
+        .replace(/\s*:\s*\[object Object\]\s*$/i, '')
+        .trim() || '额度检查失败';
+      config.runtime.lastError = lastStatusCode ? `${lastStatusCode}: ${errorMessage}` : errorMessage;
     }
 
     return config.runtime;
@@ -584,8 +660,9 @@ function createAccountManager(options) {
   async function refreshSingleConfigWithLogging(config, reason) {
     const previousAvailability = config.runtime.available;
     const previousReason = config.runtime.reason;
+    const includeDisabled = reason === 'startup';
 
-    await checkSingleAccountQuota(config, { allowSwitch: false });
+    await checkSingleAccountQuota(config, { allowSwitch: false, includeDisabled });
 
     const availabilityChanged = previousAvailability !== config.runtime.available || previousReason !== config.runtime.reason;
     if (availabilityChanged && !config.runtime.available && reason !== 'startup') {
@@ -634,6 +711,7 @@ function createAccountManager(options) {
       }
     } finally {
       quotaMonitorRunning = false;
+      scheduleNextQuotaRecovery();
     }
   }
 
@@ -650,8 +728,12 @@ function createAccountManager(options) {
     }
 
     quotaMonitorTimer = setInterval(() => {
-      void refreshQuotas('poll');
+      const currentConfig = configs[activeConfigIndex] || null;
+      void refreshQuotas('poll', {
+        refreshPredicate: config => config === currentConfig,
+      });
     }, quotaCheckIntervalMs);
+    scheduleNextQuotaRecovery();
   }
 
   /**
@@ -661,6 +743,10 @@ function createAccountManager(options) {
     if (quotaMonitorTimer) {
       clearInterval(quotaMonitorTimer);
       quotaMonitorTimer = null;
+    }
+    if (quotaRecoveryTimer) {
+      clearTimeout(quotaRecoveryTimer);
+      quotaRecoveryTimer = null;
     }
   }
 

@@ -2,6 +2,7 @@ const DEFAULT_SETTINGS = {
   baseUrl: 'http://localhost:3100',
   authToken: ''
 };
+const QUOTA_REFRESH_INTERVAL_SECONDS = 5 * 60;
 
 const messageEl = document.getElementById('message');
 const cardsEl = document.getElementById('cards');
@@ -124,10 +125,20 @@ async function requestJson(path, options = {}) {
 }
 
 function runtimeBadge(item) {
+  if (item?.item?.enabled !== false && item?.runtime?.available === false) {
+    return '<span class="badge danger">不可用</span>';
+  }
   if (item.is_active) {
     return '<span class="badge active">当前</span>';
   }
+  if (item?.runtime?.available === true) {
+    return '<span class="badge ok">可用</span>';
+  }
   return '';
+}
+
+function isConfigEnabled(item) {
+  return item?.item?.enabled !== false;
 }
 
 function updateApiModeToggle(enabled) {
@@ -150,15 +161,72 @@ function getConfigType(item) {
   return item?.item?.type === 'apikey' ? 'apikey' : 'token';
 }
 
+function getDisplayRate(item) {
+  if (getConfigType(item) !== 'apikey') {
+    return null;
+  }
+
+  const rawRate = item?.item?.rate;
+  if (typeof rawRate === 'number') {
+    return Number.isFinite(rawRate) ? rawRate : null;
+  }
+  if (typeof rawRate !== 'string' || rawRate.trim() === '') {
+    return null;
+  }
+
+  const rate = Number(rawRate);
+  return Number.isFinite(rate) ? rate : null;
+}
+
+function getDisplayRefreshAt(item) {
+  if (getConfigType(item) !== 'token') {
+    return null;
+  }
+
+  const primaryResetAt = Number(item?.runtime?.primary_reset_at);
+  const secondaryResetAt = Number(item?.runtime?.secondary_reset_at);
+  const resetTimes = [primaryResetAt, secondaryResetAt]
+    .filter(value => Number.isFinite(value) && value > 0);
+  return resetTimes.length ? Math.min(...resetTimes) : null;
+}
+
 function getVisibleConfigs(configs) {
   const filtered = selectedConfigFilter === 'all'
     ? configs
     : configs.filter(item => getConfigType(item) === selectedConfigFilter);
 
   return [...filtered].sort((left, right) => {
+    if (isConfigEnabled(left) !== isConfigEnabled(right)) {
+      return isConfigEnabled(left) ? -1 : 1;
+    }
     if (Boolean(left?.is_active) !== Boolean(right?.is_active)) {
       return left?.is_active ? -1 : 1;
     }
+
+    if (getConfigType(left) === 'token' && getConfigType(right) === 'token') {
+      const leftRefreshAt = getDisplayRefreshAt(left);
+      const rightRefreshAt = getDisplayRefreshAt(right);
+      const hasLeftRefreshAt = leftRefreshAt !== null;
+      const hasRightRefreshAt = rightRefreshAt !== null;
+      if (hasLeftRefreshAt !== hasRightRefreshAt) {
+        return hasLeftRefreshAt ? -1 : 1;
+      }
+      if (hasLeftRefreshAt && leftRefreshAt !== rightRefreshAt) {
+        return leftRefreshAt - rightRefreshAt;
+      }
+    }
+
+    const leftRate = getDisplayRate(left);
+    const rightRate = getDisplayRate(right);
+    const hasLeftRate = leftRate !== null;
+    const hasRightRate = rightRate !== null;
+    if (hasLeftRate !== hasRightRate) {
+      return hasLeftRate ? -1 : 1;
+    }
+    if (hasLeftRate && leftRate !== rightRate) {
+      return leftRate - rightRate;
+    }
+
     return Number(left?.index ?? 0) - Number(right?.index ?? 0);
   });
 }
@@ -272,8 +340,14 @@ function cancelEditConfig() {
   updateConfigMode();
 }
 
-function renderSwitchButton(item) {
-  if (item.is_active) {
+function renderEnableButton(item) {
+  const enabled = isConfigEnabled(item);
+  const label = enabled ? '禁用' : '启用';
+  return `<button class="button ${enabled ? 'secondary' : 'soft-success'} inline-enable" type="button" data-action="toggle-enabled" data-enabled="${enabled ? 'false' : 'true'}" data-index="${item.index}">${label}</button>`;
+}
+
+function renderConfigSwitchButton(item) {
+  if (item.is_active || !isConfigEnabled(item)) {
     return '';
   }
 
@@ -290,6 +364,9 @@ function isApiKeyConfig(item) {
 }
 
 function getConfigStateClass(item) {
+  if (!isConfigEnabled(item)) {
+    return 'is-disabled';
+  }
   return item?.runtime?.available === false ? 'is-abnormal' : 'is-normal';
 }
 
@@ -353,15 +430,47 @@ function renderMetricCard(label, value, refreshAt) {
   </div>`;
 }
 
+function getQuotaRefreshCountdownSeconds(item) {
+  if (isApiKeyConfig(item) || !item?.is_active) {
+    return null;
+  }
+
+  const lastCheckedAt = Number(item?.runtime?.last_checked_at);
+  if (!Number.isFinite(lastCheckedAt) || lastCheckedAt <= 0) {
+    return null;
+  }
+
+  return Math.max(0, QUOTA_REFRESH_INTERVAL_SECONDS - Math.floor((Date.now() - lastCheckedAt) / 1000));
+}
+
+function renderQuotaRefreshCountdown(item) {
+  const seconds = getQuotaRefreshCountdownSeconds(item);
+  if (seconds === null) {
+    return '';
+  }
+
+  return `<span class="quota-refresh-countdown" data-quota-countdown data-last-checked-at="${item.runtime.last_checked_at}"><strong>${seconds}秒</strong></span>`;
+}
+
+function updateQuotaRefreshCountdowns() {
+  document.querySelectorAll('[data-quota-countdown]').forEach(element => {
+    const lastCheckedAt = Number(element.dataset.lastCheckedAt);
+    if (!Number.isFinite(lastCheckedAt) || lastCheckedAt <= 0) {
+      return;
+    }
+
+    const seconds = Math.max(0, QUOTA_REFRESH_INTERVAL_SECONDS - Math.floor((Date.now() - lastCheckedAt) / 1000));
+    element.innerHTML = `<strong>${seconds}秒</strong>`;
+  });
+}
+
 function renderRuntimeHighlights(item) {
   if (isApiKeyConfig(item)) {
     return '';
   }
 
-  const runtime = item?.runtime;
-  const runtimeSummary = runtime?.runtime_summary || '';
+  const runtimeSummary = item?.runtime?.runtime_summary || '';
   const metrics = parseRuntimeMetrics(runtimeSummary);
-
   const cards = [
     renderMetricCard('额度', metrics.remaining.value, metrics.remaining.refreshAt),
     renderMetricCard('周额度', metrics.weekly.value, metrics.weekly.refreshAt)
@@ -379,18 +488,119 @@ function renderApiKeyRate(item) {
 }
 
 function formatRuntimeSummary(item) {
-  const runtimeSummary = item?.runtime?.runtime_summary || '暂无运行态数据';
-  const normalized = String(runtimeSummary || '暂无运行态数据').trim();
-
-  if (isApiKeyConfig(item)) {
-    return normalized
-      .split('|')
-      .map(part => part.trim())
-      .filter(part => part && !part.startsWith('额度=') && !part.startsWith('周额度=') && !part.startsWith('刷新时间='))
-      .join(' | ');
+  if (item?.runtime?.available !== false) {
+    return '';
   }
 
-  return normalized.replace(/\s*\|\s*周额度=/, '\n周额度=');
+  const runtimeSummary = String(item?.runtime?.runtime_summary || '');
+  const runtimeReason = item?.runtime?.runtime_reason || item?.runtime?.reason;
+  const lastError = item?.runtime?.last_error;
+  if (runtimeReason && runtimeReason !== 'disabled' && lastError) {
+    if (/^\d+\s*:/.test(lastError)) {
+      return lastError;
+    }
+    return `${runtimeReason}: ${lastError}`;
+  }
+  if (lastError && !/^\[object Object\]$/i.test(String(lastError).trim())) {
+    return String(lastError);
+  }
+  if (runtimeReason && runtimeReason !== 'disabled') {
+    return `不可用原因：${runtimeReason}`;
+  }
+  const error = runtimeSummary
+    .split('|')
+    .map(part => part.trim())
+    .find(part => part.startsWith('错误='))
+    ?.slice('错误='.length)
+    .trim();
+  if (error && !/^\[object Object\]$/i.test(error)) {
+    return error;
+  }
+  const reason = runtimeSummary
+    .split('|')
+    .map(part => part.trim())
+    .find(part => part.startsWith('状态='))
+    ?.slice('状态='.length)
+    .trim();
+  if (reason === '已禁用') {
+    return '';
+  }
+  return `不可用原因：${reason || '未知原因'}`;
+}
+
+function renderRuntimeSummary(item) {
+  const summary = formatRuntimeSummary(item);
+  return summary ? `<div class="config-runtime-summary">${escapeHtml(summary)}</div>` : '';
+}
+
+function formatTokenValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Number.isInteger(value) ? value.toLocaleString('en-US') : String(value);
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    return Number(value).toLocaleString('en-US');
+  }
+  return String(value ?? '-');
+}
+
+function formatUsageDetails(details) {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) {
+    return '-';
+  }
+
+  return Object.entries(details)
+    .map(([key, value]) => `${key}=${typeof value === 'object' ? formatUsageDetails(value) : formatTokenValue(value)}`)
+    .join(', ') || '-';
+}
+
+function getCachedTokenCount(usage) {
+  return usage?.cached_tokens
+    ?? usage?.input_tokens_details?.cached_tokens
+    ?? usage?.prompt_tokens_details?.cached_tokens
+    ?? usage?.cache_read_input_tokens
+    ?? usage?.cache_read_input_tokens_details?.cached_tokens
+    ?? null;
+}
+
+function renderLatestResponseSummary(latestRequest, item) {
+  if (!latestRequest || !item?.is_active) {
+    return '';
+  }
+
+  const values = [];
+  if (latestRequest.response_model) {
+    values.push(latestRequest.response_model);
+  }
+  if (!values.length) {
+    return '';
+  }
+
+  return `<span class="latest-response-summary">${values.map(value => escapeHtml(value)).join(' · ')}</span>`;
+}
+
+function renderLatestResponse(latestRequest, item) {
+  if (!latestRequest || !item?.is_active) {
+    return '';
+  }
+
+  const usage = latestRequest.usage && typeof latestRequest.usage === 'object' ? latestRequest.usage : null;
+  const fields = [];
+  const addField = (label, value, formatter = value => value) => {
+    if (value === null || typeof value === 'undefined' || value === '') {
+      return;
+    }
+    fields.push(`${label}：${formatter(value)}`);
+  };
+
+  addField('时间', latestRequest.captured_at, value => new Date(value).toLocaleString('zh-CN'));
+  addField('耗时', latestRequest.duration_ms, value => `${value}ms`);
+  addField('total_tokens', usage?.total_tokens, formatTokenValue);
+  addField('缓存 Token', getCachedTokenCount(usage), formatTokenValue);
+
+  return `<div class="latest-response">
+    <div class="latest-response-title">最近一次上游响应</div>
+    <div class="latest-response-fields">${fields.map(field => `<span>${escapeHtml(field)}</span>`).join('')}</div>
+  </div>`;
 }
 
 function formatCreatedAt(item) {
@@ -487,22 +697,31 @@ function renderCards(data) {
                 <div class="config-status-row">
                   ${runtimeBadge(item)}
                   ${renderRuntimeHighlights(item)}
+                  ${renderRuntimeSummary(item)}
+                  <div class="config-live-meta">
+                    ${renderLatestResponseSummary(data.latest_request, item)}
+                    ${renderQuotaRefreshCountdown(item)}
+                  </div>
                 </div>
               </div>
-              ${renderSwitchButton(item)}
+              <div class="config-head-actions">
+                ${renderConfigSwitchButton(item)}
+              </div>
             </div>
           </div>
           ${renderToggleMeta(item)}
         </summary>
         <div class="config-content">
           <div class="config-actions-row">
-            <div class="config-runtime-line">${escapeHtml(formatRuntimeSummary(item))}</div>
+            ${formatRuntimeSummary(item) ? `<div class="config-runtime-line is-unavailable">${escapeHtml(formatRuntimeSummary(item))}</div>` : ''}
             <div class="config-button-group">
               ${renderRefreshTokenButton(item)}
+              ${renderEnableButton(item)}
               <button class="button secondary inline-edit" type="button" data-action="edit-config" data-index="${item.index}">编辑</button>
               <button class="button danger inline-danger" type="button" data-action="delete-config" data-index="${item.index}">删除</button>
             </div>
           </div>
+          ${renderLatestResponse(data.latest_request, item)}
         </div>
       </details>
     `).join('')}
@@ -525,11 +744,16 @@ function renderSnapshot(data) {
 
   renderApiKeys(apikeys);
   renderCards(data);
+  updateQuotaRefreshCountdowns();
 }
 
-async function loadSnapshot(message = '') {
+setInterval(updateQuotaRefreshCountdowns, 1000);
+
+async function loadSnapshot(message = '', forceRefresh = false) {
   try {
-    const data = await requestJson('/admin/api/configs');
+    const data = await requestJson(forceRefresh ? '/admin/api/configs/refresh' : '/admin/api/configs', {
+      method: forceRefresh ? 'POST' : 'GET'
+    });
     renderSnapshot(data);
     setConnectionBadge('ok', '连接正常');
     setMessage(message ? 'info' : '', message);
@@ -607,6 +831,16 @@ async function activateConfig(index) {
   setMessage('info', '已切换当前使用配置。');
 }
 
+async function toggleConfigEnabled(index, enabled) {
+  const result = await requestJson(`/admin/api/configs/${index}/enabled`, {
+    method: 'POST',
+    body: JSON.stringify({ enabled: Boolean(enabled) })
+  });
+
+  renderSnapshot(result);
+  setMessage('info', enabled ? '配置项已启用。' : '配置项已禁用，不再参与自动切换。');
+}
+
 async function refreshConfigToken(index) {
   const result = await requestJson(`/admin/api/configs/${index}/refresh-token`, {
     method: 'POST'
@@ -675,7 +909,7 @@ saveSettingsButton.addEventListener('click', bindBusy(saveSettingsButton, async 
 
 refreshButton.addEventListener('click', bindBusy(refreshButton, async () => {
   const previousFilter = selectedConfigFilter;
-  await loadSnapshot('已刷新配置状态。');
+  await loadSnapshot('已刷新启用账号额度。', true);
   setSelectedConfigFilter(previousFilter);
 }));
 
@@ -761,6 +995,24 @@ document.addEventListener('click', async event => {
       setMessage('error', error.message);
     } finally {
       switchConfigButton.disabled = false;
+    }
+    return;
+  }
+
+  const toggleEnabledButton = event.target.closest('[data-action="toggle-enabled"]');
+  if (toggleEnabledButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleEnabledButton.disabled = true;
+    try {
+      await toggleConfigEnabled(
+        toggleEnabledButton.dataset.index,
+        toggleEnabledButton.dataset.enabled === 'true'
+      );
+    } catch (error) {
+      setMessage('error', error.message);
+    } finally {
+      toggleEnabledButton.disabled = false;
     }
     return;
   }

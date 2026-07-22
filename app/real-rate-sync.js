@@ -79,10 +79,15 @@ function inferGroupName(config, groups) {
     const label = `${config.description || ''} ${config.baseUrl || ''}`.toLowerCase();
     const groupNames = Object.keys(groups || {});
     if (label.includes('pro')) {
-        return groupNames.find(group => group.includes('gpt pro')) || '';
+        const proGroups = groupNames.filter(group => group.toLowerCase().includes('gpt pro'));
+        return proGroups.find(group => group.includes('专用')) || proGroups[0] || '';
     }
     if (label.includes('plus')) {
-        return groupNames.find(group => group.includes('gpt') && (group.includes('不包括pro') || !group.includes('pro'))) || '';
+        const plusGroups = groupNames.filter(group => {
+            const normalizedGroup = group.toLowerCase();
+            return normalizedGroup.includes('gpt') && normalizedGroup.includes('不包括pro');
+        });
+        return plusGroups.find(group => group.includes('专用')) || plusGroups[0] || '';
     }
     return '';
 }
@@ -195,4 +200,10 @@ async function fetchHanheApiKeyRates(options = {}) {
     return { rates, accessToken };
 }
 
-module.exports = { fetchRealApiKeyRates, fetchHanheApiKeyRates, getSiteCredentials, findMatchingToken };
+module.exports = {
+    fetchRealApiKeyRates,
+    fetchHanheApiKeyRates,
+    getSiteCredentials,
+    findMatchingToken,
+    inferGroupName,
+};

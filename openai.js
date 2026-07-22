@@ -40,6 +40,7 @@ const {
     moveConfigItem,
     readParsedConfigFile,
     updateConfigItem,
+    updateConfigEnabled,
     updateConfigSettings,
     writeParsedConfigFile
 } = require('./app/config-editor');
@@ -61,9 +62,10 @@ const CONFIG_FILE = path.join(__dirname, CONFIG_FILE_NAME);
 const CONTROL_TOKEN = process.env.AIROUTER_CONTROL_TOKEN || '';
 const CONTROL_REQUEST_FILE = process.env.AIROUTER_CONTROL_REQUEST_FILE || '';
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';
-const QUOTA_CHECK_INTERVAL_MS = 1 * 60 * 1000;
+const QUOTA_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const API_MODE_AUTO_SWITCH_INTERVAL_MS = 5 * 60 * 1000;
 const REAL_RATE_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+const LATEST_RESPONSE_BODY_LIMIT_BYTES = 256 * 1024;
 const MIN_REMAINING_PERCENT = 3;
 const MIN_WEEKLY_REMAINING_PERCENT = 1;
 const HOP_BY_HOP_HEADERS = new Set([
@@ -197,6 +199,8 @@ let apiModeAutoSwitchTimer = null;
 let apiModeAutoSwitchRunning = false;
 let realRateSyncTimer = null;
 let realRateSyncRunning = false;
+const realRateSyncSessions = new Map();
+let latestRequestResponse = null;
 const activeSockets = new Set();
 
 // ==================== 工具函数 ====================
@@ -453,10 +457,21 @@ function classifyApiKeyUpstreamFailure(config, statusCode) {
     return null;
 }
 
-function getConfigRate(config) {
-    const realRate = config && config.runtime && config.runtime.realRate;
-    const rate = Number(typeof realRate === 'number' ? realRate : config && config.rate);
+function parseConfigRate(value) {
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value !== 'string' || value.trim() === '') {
+        return null;
+    }
+
+    const rate = Number(value);
     return Number.isFinite(rate) ? rate : null;
+}
+
+function getConfigRate(config) {
+    const realRate = parseConfigRate(config && config.runtime && config.runtime.realRate);
+    return realRate !== null ? realRate : parseConfigRate(config && config.rate);
 }
 
 function getLocalRate(config) {
@@ -465,7 +480,7 @@ function getLocalRate(config) {
 }
 
 async function refreshRealApiKeyRates() {
-    if (realRateSyncRunning) return;
+    if (!apiModeAutoSwitchEnabled || realRateSyncRunning) return;
     const usAiTargets = apiConfigs.filter(config => config.type === 'apikey' && config.baseUrl.includes('us-ai3.twskyhope.top'));
     const codePlanTargets = apiConfigs.filter(config => config.type === 'apikey' && config.baseUrl.includes('code-plan.site'));
     const hanheTargets = apiConfigs.filter(config => config.type === 'apikey' && config.baseUrl.includes('api.hanhegufei.online'));
@@ -475,21 +490,71 @@ async function refreshRealApiKeyRates() {
     try {
         const syncTasks = [];
         if (usAiTargets.length) {
-            syncTasks.push(fetchRealApiKeyRates({ host: 'us-ai3.twskyhope.top', configs: usAiTargets, timeoutMs: QUOTA_CHECK_TIMEOUT_MS }));
+            const session = realRateSyncSessions.get('us-ai3.twskyhope.top') || {};
+            syncTasks.push({
+                key: 'us-ai3.twskyhope.top',
+                promise: fetchRealApiKeyRates({
+                    host: 'us-ai3.twskyhope.top',
+                    configs: usAiTargets,
+                    sessionCookie: session.sessionCookie,
+                    userId: session.userId,
+                    timeoutMs: QUOTA_CHECK_TIMEOUT_MS,
+                }),
+            });
         }
         if (codePlanTargets.length) {
-            syncTasks.push(fetchRealApiKeyRates({ host: 'code-plan.site', baseUrl: 'https://code-plan.site', configs: codePlanTargets, timeoutMs: QUOTA_CHECK_TIMEOUT_MS }));
+            const session = realRateSyncSessions.get('code-plan.site') || {};
+            syncTasks.push({
+                key: 'code-plan.site',
+                promise: fetchRealApiKeyRates({
+                    host: 'code-plan.site',
+                    baseUrl: 'https://code-plan.site',
+                    configs: codePlanTargets,
+                    sessionCookie: session.sessionCookie,
+                    userId: session.userId,
+                    timeoutMs: QUOTA_CHECK_TIMEOUT_MS,
+                }),
+            });
         }
         if (hanheTargets.length) {
-            syncTasks.push(fetchHanheApiKeyRates({ configs: hanheTargets, timeoutMs: QUOTA_CHECK_TIMEOUT_MS }));
+            const session = realRateSyncSessions.get('api.hanhegufei.online') || {};
+            syncTasks.push({
+                key: 'api.hanhegufei.online',
+                promise: fetchHanheApiKeyRates({
+                    configs: hanheTargets,
+                    accessToken: session.accessToken,
+                    timeoutMs: QUOTA_CHECK_TIMEOUT_MS,
+                }),
+            });
         }
-        const settledResults = await Promise.allSettled(syncTasks);
+        const settledResults = await Promise.allSettled(syncTasks.map(task => task.promise));
         const results = settledResults
             .filter(result => result.status === 'fulfilled')
             .map(result => result.value);
+        if (!apiModeAutoSwitchEnabled) {
+            return;
+        }
         for (const result of settledResults) {
             if (result.status === 'rejected') {
                 warn(`单站点真实倍率同步失败，继续处理其他站点: ${result.reason.message}`);
+            }
+        }
+        for (let index = 0; index < settledResults.length; index += 1) {
+            const result = settledResults[index];
+            if (result.status !== 'fulfilled') {
+                continue;
+            }
+            const value = result.value;
+            const session = {};
+            if (value.sessionCookie) {
+                session.sessionCookie = value.sessionCookie;
+                session.userId = value.userId || '';
+            }
+            if (value.accessToken) {
+                session.accessToken = value.accessToken;
+            }
+            if (Object.keys(session).length > 0) {
+                realRateSyncSessions.set(syncTasks[index].key, session);
             }
         }
         let synced = 0;
@@ -518,6 +583,9 @@ function stopRealRateSyncMonitor() {
 
 function startRealRateSyncMonitor() {
     stopRealRateSyncMonitor();
+    if (!apiModeAutoSwitchEnabled) {
+        return;
+    }
     realRateSyncTimer = setInterval(() => {
         void refreshRealApiKeyRates();
     }, REAL_RATE_SYNC_INTERVAL_MS);
@@ -526,11 +594,11 @@ function startRealRateSyncMonitor() {
 
 function isRateConfiguredApiKey(config) {
     const rate = getConfigRate(config);
-    return Boolean(config && config.type === 'apikey' && rate !== null);
+    return Boolean(config && config.enabled !== false && config.type === 'apikey' && rate !== null);
 }
 
 function selectApiModeAutoSwitchTarget(configs, activeConfig, getAccountStatus = () => null) {
-    if (!activeConfig || activeConfig.type !== 'apikey') {
+    if (!activeConfig || activeConfig.enabled === false || activeConfig.type !== 'apikey') {
         return null;
     }
 
@@ -646,12 +714,92 @@ function isResponsesFailoverInspectionCandidate(statusCode, headers) {
         isInspectableResponsesEventStream(headers);
 }
 
-function writeBufferedUpstreamResponse(res, statusCode, rawHeaders, bodyBuffer) {
+function extractLatestResponsePayload(bodyText, contentType) {
+    const normalizedContentType = String(contentType || '').toLowerCase();
+    if (normalizedContentType.includes('text/event-stream')) {
+        let completedPayload = null;
+        for (const line of String(bodyText || '').split(/\r?\n/)) {
+            if (!line.startsWith('data:')) {
+                continue;
+            }
+
+            const dataText = line.slice(5).trim();
+            if (!dataText || dataText === '[DONE]') {
+                continue;
+            }
+
+            try {
+                const eventPayload = JSON.parse(dataText);
+                if (eventPayload.type === 'response.completed' && eventPayload.response) {
+                    completedPayload = eventPayload.response;
+                } else if (!completedPayload && eventPayload.response) {
+                    completedPayload = eventPayload.response;
+                } else if (!completedPayload && eventPayload.model) {
+                    completedPayload = eventPayload;
+                } else if (!completedPayload && eventPayload.id) {
+                    completedPayload = eventPayload;
+                }
+            } catch {
+                // Ignore non-JSON SSE lines and keep parsing the final response event.
+            }
+        }
+        return completedPayload;
+    }
+
+    try {
+        const payload = JSON.parse(bodyText || '{}');
+        return payload && typeof payload === 'object' ? payload : null;
+    } catch {
+        return null;
+    }
+}
+
+function recordLatestRequestResponse(context, rawHeaders, bodyBuffer) {
+    const responseHeaders = normalizeUpstreamResponseHeaders(rawHeaders);
+    const limitedBody = Buffer.isBuffer(bodyBuffer)
+        ? bodyBuffer.subarray(0, LATEST_RESPONSE_BODY_LIMIT_BYTES)
+        : Buffer.alloc(0);
+    const contentType = responseHeaders['content-type'] || '';
+    const bodyText = decodeResponseBody(limitedBody, responseHeaders['content-encoding']);
+    const payload = extractLatestResponsePayload(bodyText, contentType);
+    const responsePayload = payload?.response && typeof payload.response === 'object' ? payload.response : payload;
+    const rawUsage = responsePayload?.usage && typeof responsePayload.usage === 'object'
+        ? responsePayload.usage
+        : null;
+    const cachedTokens = rawUsage?.cached_tokens
+        ?? rawUsage?.input_tokens_details?.cached_tokens
+        ?? rawUsage?.prompt_tokens_details?.cached_tokens
+        ?? rawUsage?.cache_read_input_tokens
+        ?? rawUsage?.cache_read_input_tokens_details?.cached_tokens;
+    const usage = rawUsage
+        ? {
+            ...(rawUsage.total_tokens === null || typeof rawUsage.total_tokens === 'undefined'
+                ? {}
+                : { total_tokens: rawUsage.total_tokens }),
+            ...(cachedTokens === null || typeof cachedTokens === 'undefined'
+                ? {}
+                : { cached_tokens: cachedTokens }),
+        }
+        : null;
+
+    latestRequestResponse = {
+        captured_at: new Date().toISOString(),
+        duration_ms: Math.max(0, Date.now() - context.startedAt),
+        response_model: responsePayload?.model || context.responseModel || null,
+        usage,
+    };
+}
+
+function writeBufferedUpstreamResponse(res, statusCode, rawHeaders, bodyBuffer, captureContext = null) {
     const responseMeta = applyResponseHeaders(res, statusCode, rawHeaders);
     res.flushHeaders();
 
     if (!res.writableEnded) {
         res.end(bodyBuffer);
+    }
+
+    if (captureContext) {
+        recordLatestRequestResponse(captureContext, rawHeaders, bodyBuffer);
     }
 
     return responseMeta;
@@ -945,7 +1093,14 @@ async function reloadRuntime(loadedConfig, reason, options = {}) {
     applyLoadedConfig(hydrateLoadedConfig(loadedConfig, options));
 
     if (hasQuotaMonitoredConfigs(apiConfigs) && !options.skipQuotaRefresh) {
-        await accountManager.refreshQuotas(reason);
+        if (reason === 'startup') {
+            await accountManager.refreshQuotas(reason);
+        } else {
+            const currentConfig = accountManager.getActiveConfig();
+            await accountManager.refreshQuotas(reason, {
+                refreshPredicate: config => config === currentConfig,
+            });
+        }
     }
 
     const currentConfig = selectReloadedActiveConfig(accountManager, reason, options);
@@ -1125,6 +1280,7 @@ function serializeAccountStatus(accountStatus) {
         description: accountStatus.description,
         label: accountStatus.label,
         available: accountStatus.available,
+        enabled: accountStatus.enabled,
         remaining_percent: accountStatus.remainingPercent,
         primary_remaining_percent: accountStatus.primaryRemainingPercent,
         primary_reset_at: accountStatus.primaryResetAt,
@@ -1134,6 +1290,8 @@ function serializeAccountStatus(accountStatus) {
         secondary_reset_after_seconds: accountStatus.secondaryResetAfterSeconds,
         last_checked_at: accountStatus.lastCheckedAt,
         reason: accountStatus.reason,
+        runtime_reason: accountStatus.runtimeReason,
+        last_error: accountStatus.lastError,
         runtime_summary: accountStatus.runtimeSummary,
         summary_line: accountStatus.summaryLine,
     };
@@ -1160,14 +1318,18 @@ function buildConfigAdminResponse() {
         claude_code: currentParsedConfig.claude_code ?? null,
         responses: currentParsedConfig.responses ?? null,
         active_config_index: activeAccountStatus ? activeAccountStatus.index : null,
-        configs: currentParsedConfig.configs.map((item, index) => ({
-            index,
-            item: apiConfigs[index]?.type === 'apikey' && typeof apiConfigs[index]?.runtime?.realRate === 'number'
-                ? { ...item, rate: apiConfigs[index].runtime.realRate }
-                : item,
-            is_active: activeAccountStatus ? activeAccountStatus.index === index : false,
-            runtime: apiConfigs[index] ? serializeAccountStatus(accountManager.getAccountStatus(apiConfigs[index])) : null
-        }))
+        latest_request: latestRequestResponse,
+        configs: currentParsedConfig.configs.map((item, index) => {
+            const runtimeRate = parseConfigRate(apiConfigs[index]?.runtime?.realRate);
+            return {
+                index,
+                item: apiConfigs[index]?.type === 'apikey' && runtimeRate !== null
+                    ? { ...item, rate: runtimeRate }
+                    : item,
+                is_active: activeAccountStatus ? activeAccountStatus.index === index : false,
+                runtime: apiConfigs[index] ? serializeAccountStatus(accountManager.getAccountStatus(apiConfigs[index])) : null
+            };
+        })
     };
 }
 
@@ -1179,9 +1341,14 @@ async function refreshConfigAdminResponse(options = {}) {
     const buildResponse = options.buildResponse || buildConfigAdminResponse;
 
     if (manager && shouldRefreshQuota) {
-        await manager.refreshQuotas('admin_refresh', {
-            refreshPredicate: config => config.type !== 'apikey' && config.runtime && config.runtime.available === false
-        });
+      const currentConfig = options.refreshCurrentOnly && typeof manager.getActiveConfig === 'function'
+            ? manager.getActiveConfig()
+            : null;
+      await manager.refreshQuotas('admin_refresh', {
+        refreshPredicate: currentConfig
+            ? config => config === currentConfig
+            : config => config.type !== 'apikey' && config.enabled !== false
+      });
     }
 
     return buildResponse();
@@ -1622,6 +1789,9 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         body: hasBufferedBody ? body : undefined,
         timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS
     });
+    const captureContext = {
+        startedAt: Date.now(),
+    };
 
     let headersApplied = false;
     let responseFinished = false;
@@ -1630,6 +1800,36 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const responseBodyChunks = [];
     let upstreamResponseHeaders = {};
     let upstreamResponse = null;
+    const latestResponseChunks = [];
+    let latestResponseBytes = 0;
+    let streamEventText = '';
+
+    function captureStreamResponseModel(chunk) {
+        streamEventText += (Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+        const lines = streamEventText.split(/\r?\n/);
+        streamEventText = lines.pop() || '';
+
+        for (const line of lines) {
+            if (!line.startsWith('data:')) {
+                continue;
+            }
+
+            const dataText = line.slice(5).trim();
+            if (!dataText || dataText === '[DONE]') {
+                continue;
+            }
+
+            try {
+                const eventPayload = JSON.parse(dataText);
+                const responseModel = eventPayload?.response?.model || eventPayload?.model;
+                if (responseModel) {
+                    captureContext.responseModel = responseModel;
+                }
+            } catch {
+                // Keep forwarding the stream; the final buffered parser handles complete JSON events.
+            }
+        }
+    }
 
     function handleQuotaUsageResponseComplete() {
         if (!shouldLogQuotaUsage) {
@@ -1656,8 +1856,15 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         res.flushHeaders();
 
         const writeChunk = chunk => {
+            captureStreamResponseModel(chunk);
             if (shouldLogQuotaUsage) {
                 responseBodyChunks.push(chunk);
+            }
+            if (latestResponseBytes < LATEST_RESPONSE_BODY_LIMIT_BYTES) {
+                const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                const remaining = LATEST_RESPONSE_BODY_LIMIT_BYTES - latestResponseBytes;
+                latestResponseChunks.push(buffer.subarray(0, remaining));
+                latestResponseBytes += Math.min(buffer.length, remaining);
             }
             res.write(chunk);
         };
@@ -1671,6 +1878,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         response.on('end', () => {
             responseFinished = true;
             handleQuotaUsageResponseComplete();
+            recordLatestRequestResponse(captureContext, rawHeaders, Buffer.concat(latestResponseChunks));
 
             if (!res.writableEnded) {
                 res.end();
@@ -1754,7 +1962,8 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                         res,
                         statusCode,
                         response.headers,
-                        inspection.bodyBuffer || Buffer.alloc(0)
+                        inspection.bodyBuffer || Buffer.alloc(0),
+                        captureContext
                     ).headers;
                     headersApplied = true;
                     responseFinished = true;
@@ -1770,7 +1979,8 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     res,
                     statusCode,
                     response.headers,
-                    inspection.bodyBuffer || Buffer.alloc(0)
+                    inspection.bodyBuffer || Buffer.alloc(0),
+                    captureContext
                 ).headers;
                 headersApplied = true;
                 responseFinished = true;
@@ -2065,6 +2275,21 @@ app.post('/admin/api/configs/:index/activate', async (req, res) => {
             details: err.message
         });
     }
+});
+
+app.post('/admin/api/configs/:index/enabled', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => {
+            const enabled = req.body && req.body.enabled !== false;
+            return updateConfigEnabled(parsed, parseConfigIndex(req.params.index), enabled);
+        },
+        'admin_toggle_config_enabled',
+        200,
+        {
+            skipQuotaRefresh: true
+        }
+    );
 });
 
 app.post('/admin/api/configs/:index/move-up', async (req, res) => {
@@ -2386,7 +2611,7 @@ async function startServer() {
             log(`  - 账号数量: ${apiConfigs.length}`);
             log(`  - 当前账号: ${currentAccountStatus ? currentAccountStatus.label : '未配置'}`);
             log(`  - API 模式: ${apiModeAutoSwitchEnabled ? '开启' : '关闭'}`);
-            log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查所有 token 账号，主额度低于 ${MIN_REMAINING_PERCENT}% 或周额度不高于 ${MIN_WEEKLY_REMAINING_PERCENT}% 自动标记不可用` : '关闭（无 token 配置项）'}`);
+            log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查当前使用的 token 账号，主额度低于 ${MIN_REMAINING_PERCENT}% 或周额度不高于 ${MIN_WEEKLY_REMAINING_PERCENT}% 自动标记不可用；手动刷新时检查所有启用 token 账号` : '关闭（无 token 配置项）'}`);
             log(`  - 上游请求超时: ${UPSTREAM_REQUEST_TIMEOUT_MS > 0 ? `${UPSTREAM_REQUEST_TIMEOUT_MS}ms` : '关闭'}`);
             log(`  - quota check 超时: ${hasQuotaMonitoredConfigs(apiConfigs) ? `${QUOTA_CHECK_TIMEOUT_MS}ms` : '关闭（无 token 配置项）'}`);
             log(`  - 入口 apikey 校验: ${hasConfiguredApiKeys(currentParsedConfig) ? `开启（${getConfiguredApiKeys(currentParsedConfig).length} 个）` : '关闭（未配置 apikey）'}`);

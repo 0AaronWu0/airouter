@@ -10,6 +10,7 @@ const {
   buildImportedConfigItem,
   moveConfigItem,
   updateConfigItem,
+  updateConfigEnabled,
   updateConfigSettings,
   deleteConfigItem,
   readParsedConfigFile,
@@ -242,6 +243,18 @@ test('updateConfigItem overwrites editable fields but keeps unknown keys on the 
     description: 'rotated',
     custom_note: 'keep-me',
   });
+});
+
+test('updateConfigEnabled persists explicit disabled state and re-enables it', () => {
+  const parsed = createTokenConfig({
+    configs: [{ access_token: 'token-1', account_id: 'account-1', description: 'primary' }],
+  });
+
+  const disabled = updateConfigEnabled(parsed, 0, false);
+  assert.equal(disabled.configs[0].enabled, false);
+
+  const enabled = updateConfigEnabled(disabled, 0, true);
+  assert.equal(enabled.configs[0].enabled, true);
 });
 
 test('deleteConfigItem allows removing the last remaining config', () => {

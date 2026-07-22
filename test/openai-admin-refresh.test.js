@@ -15,6 +15,7 @@ const {
   selectApiModeAutoSwitchTarget,
   selectReloadedActiveConfig,
 } = require('../openai');
+const { inferGroupName } = require('../app/real-rate-sync');
 
 test('selectApiModeAutoSwitchTarget chooses the lowest available lower-rate apikey', () => {
   const configs = [
@@ -24,6 +25,38 @@ test('selectApiModeAutoSwitchTarget chooses the lowest available lower-rate apik
   ];
 
   assert.equal(selectApiModeAutoSwitchTarget(configs, configs[0]), configs[1]);
+});
+
+test('selectApiModeAutoSwitchTarget prefers real rates over local rates', () => {
+  const configs = [
+    { type: 'apikey', rate: '0.17', runtime: { realRate: '0.2', available: true } },
+    { type: 'apikey', rate: '0.01', runtime: { realRate: '0.16', available: true } },
+    { type: 'apikey', rate: '0.02', runtime: { realRate: '0.14', available: true } },
+  ];
+
+  assert.equal(selectApiModeAutoSwitchTarget(configs, configs[0]), configs[2]);
+});
+
+test('selectApiModeAutoSwitchTarget ignores apikey configs without a valid rate', () => {
+  const configs = [
+    { type: 'apikey', rate: '0.17', runtime: { available: true } },
+    { type: 'apikey', rate: '', runtime: { available: true } },
+    { type: 'apikey', runtime: { available: true } },
+    { type: 'apikey', rate: false, runtime: { available: true } },
+    { type: 'apikey', rate: '0.15', runtime: { available: true } },
+  ];
+
+  assert.equal(selectApiModeAutoSwitchTarget(configs, configs[0]), configs[4]);
+});
+
+test('selectApiModeAutoSwitchTarget ignores disabled apikey configs', () => {
+  const configs = [
+    { type: 'apikey', rate: '0.17', runtime: { available: true } },
+    { type: 'apikey', rate: '0.01', enabled: false, runtime: { available: true } },
+    { type: 'apikey', rate: '0.15', runtime: { available: true } },
+  ];
+
+  assert.equal(selectApiModeAutoSwitchTarget(configs, configs[0]), configs[2]);
 });
 
 test('selectApiModeAutoSwitchTarget only switches from an apikey config', () => {
@@ -40,6 +73,49 @@ test('real rate sync supports Hanhe group rate multiplier responses', () => {
   assert.match(source, /group\?\.rate_multiplier/);
 });
 
+test('real rate sync maps plus configs to the dedicated non-pro group', () => {
+  const groups = {
+    'gpt 官转专用分组': { ratio: 0.125 },
+    'gpt稳定分组(不包括pro)': { ratio: 0.1 },
+    'gpt专用分组(不包括pro)': { ratio: 0.05 },
+  };
+
+  assert.equal(inferGroupName({ description: 'plus', baseUrl: 'https://us-ai3.twskyhope.top' }, groups), 'gpt专用分组(不包括pro)');
+  assert.equal(inferGroupName({ description: 'pro', baseUrl: 'https://us-ai3.twskyhope.top' }, {
+    'gpt pro稳定分组': { ratio: 0.3 },
+    'gpt pro专用分组': { ratio: 0.125 },
+  }), 'gpt pro专用分组');
+});
+
+test('real rate sync only starts when API mode is enabled', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const functionStart = source.indexOf('function startRealRateSyncMonitor()');
+  const functionEnd = source.indexOf('\n}\n\nfunction isRateConfiguredApiKey', functionStart);
+  const functionSource = source.slice(functionStart, functionEnd);
+  assert.match(functionSource, /if \(!apiModeAutoSwitchEnabled\)/);
+  assert.match(source.slice(source.indexOf('async function refreshRealApiKeyRates()'), functionStart), /if \(!apiModeAutoSwitchEnabled \|\| realRateSyncRunning\)/);
+});
+
+test('real rate sync reuses site sessions until the upstream rejects them', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  assert.match(source, /const realRateSyncSessions = new Map\(\)/);
+  assert.match(source, /sessionCookie: session\.sessionCookie/);
+  assert.match(source, /accessToken: session\.accessToken/);
+  assert.match(source, /realRateSyncSessions\.set\(syncTasks\[index\]\.key, session\)/);
+});
+
+test('latest responses parser accepts a top-level model from token mode streams', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  assert.match(source, /!completedPayload && eventPayload\.model/);
+  assert.match(source, /response_model: responsePayload\?\.model/);
+});
+
+test('stream response capture extracts the model while forwarding chunks', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  assert.match(source, /captureStreamResponseModel\(chunk\)/);
+  assert.match(source, /captureContext\.responseModel = responseModel/);
+});
+
 test('admin snapshot marks the active config used by the OpenAI route', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
   const functionStart = source.indexOf('function buildConfigAdminResponse()');
@@ -49,6 +125,7 @@ test('admin snapshot marks the active config used by the OpenAI route', () => {
   assert.match(functionSource, /openAiRoutePredicate/);
   assert.match(functionSource, /getActiveConfig\(openAiRoutePredicate\)/);
   assert.match(functionSource, /ensureActiveConfig\('admin_snapshot', openAiRoutePredicate\)/);
+  assert.match(functionSource, /latest_request: latestRequestResponse/);
 });
 
 test('refreshConfigAdminResponse refreshes all quotas before building the admin snapshot in token mode', async () => {
@@ -71,6 +148,48 @@ test('refreshConfigAdminResponse refreshes all quotas before building the admin 
 
   assert.deepEqual(calls, ['admin_refresh']);
   assert.equal(response, expectedResponse);
+});
+
+test('refreshConfigAdminResponse refreshes only the active config when requested', async () => {
+  const configs = [{ type: 'token' }, { type: 'token' }];
+  const calls = [];
+  const manager = {
+    getActiveConfig: () => configs[1],
+    refreshQuotas: async (reason, options) => {
+      calls.push({ reason, selected: configs.filter(options.refreshPredicate) });
+    },
+  };
+
+  await refreshConfigAdminResponse({
+    accountManager: manager,
+    shouldRefreshQuota: true,
+    refreshCurrentOnly: true,
+    buildResponse: () => ({})
+  });
+
+  assert.deepEqual(calls, [{ reason: 'admin_refresh', selected: [configs[1]] }]);
+});
+
+test('refreshConfigAdminResponse refreshes all enabled token configs for manual refresh', async () => {
+  const configs = [
+    { type: 'token', enabled: true },
+    { type: 'token', enabled: false },
+    { type: 'apikey', enabled: true },
+  ];
+  const calls = [];
+  const manager = {
+    refreshQuotas: async (reason, options) => {
+      calls.push({ reason, selected: configs.filter(options.refreshPredicate) });
+    },
+  };
+
+  await refreshConfigAdminResponse({
+    accountManager: manager,
+    shouldRefreshQuota: true,
+    buildResponse: () => ({}),
+  });
+
+  assert.deepEqual(calls, [{ reason: 'admin_refresh', selected: [configs[0]] }]);
 });
 
 test('refreshConfigAdminResponse skips quota refresh when no token configs exist', async () => {

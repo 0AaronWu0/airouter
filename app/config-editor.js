@@ -163,6 +163,14 @@ function normalizeConfigItem(item, existingItem = {}) {
     };
     const type = getConfigItemType(nextItem);
 
+    if (Object.prototype.hasOwnProperty.call(item, 'enabled')) {
+        nextItem.enabled = item.enabled !== false;
+    } else if (Object.prototype.hasOwnProperty.call(existingItem, 'enabled')) {
+        nextItem.enabled = existingItem.enabled !== false;
+    } else {
+        delete nextItem.enabled;
+    }
+
     for (const field of getEditableFields(type)) {
         if (field === 'support' || field === 'rate') {
             continue;
@@ -244,6 +252,10 @@ function buildImportedConfigItem(typeOrItem, maybeItem) {
         description,
     };
 
+    if (Object.prototype.hasOwnProperty.call(item, 'enabled')) {
+        imported.enabled = item.enabled !== false;
+    }
+
     if (refreshToken) {
         imported.refresh_token = refreshToken;
     }
@@ -273,6 +285,13 @@ function updateConfigItem(parsed, index, item) {
     const nextParsed = cloneParsedConfig(parsed);
     const targetIndex = getConfigIndex(index, nextParsed);
     nextParsed.configs[targetIndex] = normalizeConfigItem(item, nextParsed.configs[targetIndex]);
+    return validateParsedConfig(nextParsed);
+}
+
+function updateConfigEnabled(parsed, index, enabled) {
+    const nextParsed = cloneParsedConfig(parsed);
+    const targetIndex = getConfigIndex(index, nextParsed);
+    nextParsed.configs[targetIndex].enabled = enabled !== false;
     return validateParsedConfig(nextParsed);
 }
 
@@ -360,6 +379,7 @@ module.exports = {
     addConfigItem,
     buildImportedConfigItem,
     updateConfigItem,
+    updateConfigEnabled,
     updateConfigSettings,
     deleteConfigItem,
     moveConfigItem,

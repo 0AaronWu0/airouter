@@ -216,6 +216,18 @@ test('getActiveConfig returns the current active account without switching', () 
   assert.equal(warnings.length, 0);
 });
 
+test('disabled config is excluded from active selection and cannot be activated', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, { enabled: false }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs);
+
+  assert.equal(manager.getActiveConfig(), null);
+  assert.equal(manager.ensureActiveConfig('disabled_config'), configs[1]);
+  assert.throws(() => manager.activateConfig(0), /配置项已禁用/);
+});
+
 test('activateConfig switches the active config without changing availability', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),

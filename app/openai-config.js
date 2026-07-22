@@ -239,6 +239,7 @@ function createTokenRuntimeConfig(config, index) {
     return {
         type: 'token',
         index,
+        enabled: config.enabled !== false,
         baseUrl: CHATGPT_BASE_URL,
         apiBasePath: CODEX_API_BASE_PATH,
         access_token: config.access_token || '',
@@ -262,6 +263,7 @@ function createApiKeyRuntimeConfig(config, index) {
     return {
         type: 'apikey',
         index,
+        enabled: config.enabled !== false,
         baseUrl,
         apiBasePath: '',
         apiKey: apikey,
